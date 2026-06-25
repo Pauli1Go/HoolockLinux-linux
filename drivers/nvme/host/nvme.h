@@ -178,6 +178,12 @@ enum nvme_quirks {
 	 * Align dma pool segment size to 512 bytes
 	 */
 	NVME_QUIRK_DMAPOOL_ALIGN_512		= (1 << 22),
+
+	/*
+	 * Apple mobile Hx NVMe controller needs Sandcastle-style scratch and
+	 * flat-DMA handling.
+	 */
+	NVME_QUIRK_HX_NVME			= (1 << 23),
 };
 
 static inline char *nvme_quirk_name(enum nvme_quirks q)
@@ -229,6 +235,8 @@ static inline char *nvme_quirk_name(enum nvme_quirks q)
 		return "broken_msi";
 	case NVME_QUIRK_DMAPOOL_ALIGN_512:
 		return "dmapool_align_512";
+	case NVME_QUIRK_HX_NVME:
+		return "hx_nvme";
 	}
 
 	return "unknown";
@@ -402,6 +410,7 @@ struct nvme_ctrl {
 	unsigned int kato;
 	bool subsystem;
 	unsigned long quirks;
+	void *quirk_data;
 	struct nvme_id_power_state psd[32];
 	struct nvme_effects_log *effects;
 	struct xarray cels;
@@ -1280,6 +1289,72 @@ struct nvme_ctrl *nvme_ctrl_from_file(struct file *file);
 struct nvme_ns *nvme_find_get_ns(struct nvme_ctrl *ctrl, unsigned nsid);
 bool nvme_get_ns(struct nvme_ns *ns);
 void nvme_put_ns(struct nvme_ns *ns);
+
+#ifdef CONFIG_NVME_HX
+int nvme_hx_preinit(struct nvme_ctrl *ctrl, struct device *dev);
+int nvme_hx_preenable(struct nvme_ctrl *ctrl, struct device *dev);
+u32 nvme_hx_max_req_size(struct nvme_ctrl *ctrl);
+u32 nvme_hx_max_queue_depth(struct nvme_ctrl *ctrl);
+int nvme_hx_alloc_req(struct nvme_ctrl *ctrl, void **handle, unsigned *tag,
+		      u64 **pages);
+u64 nvme_hx_map_req(struct nvme_ctrl *ctrl, struct device *dev, void *handle,
+		    unsigned npages);
+void nvme_hx_free_req(struct nvme_ctrl *ctrl, struct device *dev,
+		      void *handle);
+blk_status_t nvme_hx_map_data(struct nvme_ctrl *ctrl, struct request *req,
+			      struct nvme_command *cmnd);
+blk_status_t nvme_hx_unmap_data(struct nvme_ctrl *ctrl, struct request *req);
+#else
+static inline int nvme_hx_preinit(struct nvme_ctrl *ctrl, struct device *dev)
+{
+	return 0;
+}
+
+static inline int nvme_hx_preenable(struct nvme_ctrl *ctrl, struct device *dev)
+{
+	return 0;
+}
+
+static inline u32 nvme_hx_max_req_size(struct nvme_ctrl *ctrl)
+{
+	return 0;
+}
+
+static inline u32 nvme_hx_max_queue_depth(struct nvme_ctrl *ctrl)
+{
+	return 0;
+}
+
+static inline int nvme_hx_alloc_req(struct nvme_ctrl *ctrl, void **handle,
+				    unsigned *tag, u64 **pages)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline u64 nvme_hx_map_req(struct nvme_ctrl *ctrl, struct device *dev,
+				  void *handle, unsigned npages)
+{
+	return 0;
+}
+
+static inline void nvme_hx_free_req(struct nvme_ctrl *ctrl, struct device *dev,
+				    void *handle)
+{
+}
+
+static inline blk_status_t nvme_hx_map_data(struct nvme_ctrl *ctrl,
+					    struct request *req,
+					    struct nvme_command *cmnd)
+{
+	return BLK_STS_NOTSUPP;
+}
+
+static inline blk_status_t nvme_hx_unmap_data(struct nvme_ctrl *ctrl,
+					      struct request *req)
+{
+	return BLK_STS_NOTSUPP;
+}
+#endif
 
 static inline bool nvme_multi_css(struct nvme_ctrl *ctrl)
 {

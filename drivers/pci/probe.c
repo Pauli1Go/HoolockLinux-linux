@@ -9,6 +9,7 @@
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/msi.h>
+#include <linux/of.h>
 #include <linux/of_pci.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
@@ -38,6 +39,21 @@ LIST_HEAD(pci_root_buses);
 EXPORT_SYMBOL(pci_root_buses);
 
 static LIST_HEAD(pci_domain_busn_res_list);
+
+static bool pci_root_bus_parent_of_property_read_bool(struct pci_bus *bus,
+						      const char *propname)
+{
+	struct device *bridge_dev;
+
+	if (!bus || !pci_is_root_bus(bus))
+		return false;
+
+	bridge_dev = bus->bridge;
+	if (!bridge_dev || !bridge_dev->parent || !bridge_dev->parent->of_node)
+		return false;
+
+	return of_property_read_bool(bridge_dev->parent->of_node, propname);
+}
 
 struct pci_domain_busn_res {
 	struct list_head list;
@@ -2652,36 +2668,137 @@ static void pci_imm_ready_init(struct pci_dev *dev)
 		dev->imm_ready = 1;
 }
 
-static void pci_init_capabilities(struct pci_dev *dev)
+static bool pci_hx_stop_after_cap_stage(struct pci_dev *dev, const char *stage)
+{
+	char propname[64];
+
+	snprintf(propname, sizeof(propname), "hx,stop-after-pci-%s", stage);
+	if (!pci_root_bus_parent_of_property_read_bool(dev->bus, propname))
+		return false;
+
+	pci_info(dev, "HX PCIe scan stopped after pci_%s by device tree\n", stage);
+	return true;
+}
+
+static bool pci_hx_stop_after_device_add_stage(struct pci_dev *dev,
+					       const char *stage)
+{
+	char propname[80];
+
+	snprintf(propname, sizeof(propname), "hx,stop-after-pci-device-add-%s", stage);
+	if (!pci_root_bus_parent_of_property_read_bool(dev->bus, propname))
+		return false;
+
+	pci_info(dev, "HX PCIe scan stopped after pci_device_add %s by device tree\n", stage);
+	return true;
+}
+
+static bool pci_init_capabilities(struct pci_dev *dev)
 {
 	pci_ea_init(dev);		/* Enhanced Allocation */
+	if (pci_hx_stop_after_cap_stage(dev, "ea-init"))
+		return true;
+
 	pci_msi_init(dev);		/* Disable MSI */
+	if (pci_hx_stop_after_cap_stage(dev, "msi-init"))
+		return true;
+
 	pci_msix_init(dev);		/* Disable MSI-X */
+	if (pci_hx_stop_after_cap_stage(dev, "msix-init"))
+		return true;
 
 	/* Buffers for saving PCIe and PCI-X capabilities */
 	pci_allocate_cap_save_buffers(dev);
+	if (pci_hx_stop_after_cap_stage(dev, "allocate-cap-save-buffers"))
+		return true;
 
 	pci_imm_ready_init(dev);	/* Immediate Readiness */
+	if (pci_hx_stop_after_cap_stage(dev, "imm-ready-init"))
+		return true;
+
+	if (pci_root_bus_parent_of_property_read_bool(dev->bus, "hx,stop-before-pci-pm-init")) {
+		pci_info(dev, "HX PCIe scan stopped before pci_pm_init by device tree\n");
+		return true;
+	}
+
 	pci_pm_init(dev);		/* Power Management */
+
+	if (pci_hx_stop_after_cap_stage(dev, "pm-init"))
+		return true;
+
 	pci_vpd_init(dev);		/* Vital Product Data */
+	if (pci_hx_stop_after_cap_stage(dev, "vpd-init"))
+		return true;
+
 	pci_configure_ari(dev);		/* Alternative Routing-ID Forwarding */
+	if (pci_hx_stop_after_cap_stage(dev, "configure-ari"))
+		return true;
+
 	pci_iov_init(dev);		/* Single Root I/O Virtualization */
+	if (pci_hx_stop_after_cap_stage(dev, "iov-init"))
+		return true;
+
 	pci_ats_init(dev);		/* Address Translation Services */
+	if (pci_hx_stop_after_cap_stage(dev, "ats-init"))
+		return true;
+
 	pci_pri_init(dev);		/* Page Request Interface */
+	if (pci_hx_stop_after_cap_stage(dev, "pri-init"))
+		return true;
+
 	pci_pasid_init(dev);		/* Process Address Space ID */
+	if (pci_hx_stop_after_cap_stage(dev, "pasid-init"))
+		return true;
+
 	pci_acs_init(dev);		/* Access Control Services */
+	if (pci_hx_stop_after_cap_stage(dev, "acs-init"))
+		return true;
+
 	pci_ptm_init(dev);		/* Precision Time Measurement */
+	if (pci_hx_stop_after_cap_stage(dev, "ptm-init"))
+		return true;
+
 	pci_aer_init(dev);		/* Advanced Error Reporting */
+	if (pci_hx_stop_after_cap_stage(dev, "aer-init"))
+		return true;
+
 	pci_dpc_init(dev);		/* Downstream Port Containment */
+	if (pci_hx_stop_after_cap_stage(dev, "dpc-init"))
+		return true;
+
 	pci_rcec_init(dev);		/* Root Complex Event Collector */
+	if (pci_hx_stop_after_cap_stage(dev, "rcec-init"))
+		return true;
+
 	pci_doe_init(dev);		/* Data Object Exchange */
+	if (pci_hx_stop_after_cap_stage(dev, "doe-init"))
+		return true;
+
 	pci_tph_init(dev);		/* TLP Processing Hints */
+	if (pci_hx_stop_after_cap_stage(dev, "tph-init"))
+		return true;
+
 	pci_rebar_init(dev);		/* Resizable BAR */
+	if (pci_hx_stop_after_cap_stage(dev, "rebar-init"))
+		return true;
+
 	pci_dev3_init(dev);		/* Device 3 capabilities */
+	if (pci_hx_stop_after_cap_stage(dev, "dev3-init"))
+		return true;
+
 	pci_ide_init(dev);		/* Link Integrity and Data Encryption */
+	if (pci_hx_stop_after_cap_stage(dev, "ide-init"))
+		return true;
 
 	pcie_report_downtraining(dev);
+	if (pci_hx_stop_after_cap_stage(dev, "report-downtraining"))
+		return true;
+
 	pci_init_reset_methods(dev);
+	if (pci_hx_stop_after_cap_stage(dev, "init-reset-methods"))
+		return true;
+
+	return false;
 }
 
 /*
@@ -2752,7 +2869,10 @@ void pci_device_add(struct pci_dev *dev, struct pci_bus *bus)
 
 	pci_reassigndev_resource_alignment(dev);
 
-	pci_init_capabilities(dev);
+	if (pci_init_capabilities(dev)) {
+		pci_info(dev, "HX PCIe scan stopped during pci_device_add by device tree\n");
+		return;
+	}
 
 	/*
 	 * Add the device to our list of discovered devices
@@ -2762,15 +2882,33 @@ void pci_device_add(struct pci_dev *dev, struct pci_bus *bus)
 	list_add_tail(&dev->bus_list, &bus->devices);
 	up_write(&pci_bus_sem);
 
+	if (pci_hx_stop_after_device_add_stage(dev, "bus-list-add"))
+		return;
+
 	ret = pcibios_device_add(dev);
 	WARN_ON(ret < 0);
+
+	if (pci_hx_stop_after_device_add_stage(dev, "pcibios-device-add"))
+		return;
 
 	/* Set up MSI IRQ domain */
 	pci_set_msi_domain(dev);
 
+	if (pci_hx_stop_after_device_add_stage(dev, "msi-domain"))
+		return;
+
+	if (pci_root_bus_parent_of_property_read_bool(bus, "hx,block-pci-driver-probe")) {
+		ret = device_set_driver_override(&dev->dev, "hx-no-driver");
+		WARN_ON(ret < 0);
+		pci_info(dev, "HX PCIe blocked automatic PCI driver probe by device tree\n");
+	}
+
 	/* Notifier could use PCI capabilities */
 	ret = device_add(&dev->dev);
 	WARN_ON(ret < 0);
+
+	if (pci_hx_stop_after_device_add_stage(dev, "core-device-add"))
+		return;
 
 	/* Establish pdev->tsm for newly added (e.g. new SR-IOV VFs) */
 	pci_tsm_init(dev);
@@ -2793,6 +2931,11 @@ struct pci_dev *pci_scan_single_device(struct pci_bus *bus, int devfn)
 	dev = pci_scan_device(bus, devfn);
 	if (!dev)
 		return NULL;
+
+	if (pci_root_bus_parent_of_property_read_bool(bus, "hx,stop-before-pci-device-add")) {
+		pci_info(dev, "HX PCIe scan stopped before pci_device_add by device tree\n");
+		return dev;
+	}
 
 	pci_device_add(dev, bus);
 
@@ -3095,8 +3238,14 @@ static unsigned int pci_scan_child_bus_extend(struct pci_bus *bus,
 	dev_dbg(&bus->dev, "scanning bus\n");
 
 	/* Go find them, Rover! */
-	for (devnr = 0; devnr < PCI_MAX_NR_DEVS; devnr++)
+	for (devnr = 0; devnr < PCI_MAX_NR_DEVS; devnr++) {
 		pci_scan_slot(bus, PCI_DEVFN(devnr, 0));
+		if (devnr == 0 &&
+		    pci_root_bus_parent_of_property_read_bool(bus, "hx,stop-after-pci-root-slot0")) {
+			dev_warn(&bus->dev, "HX PCIe scan stopped after root bus slot 0 by device tree\n");
+			return max;
+		}
+	}
 
 	/* Reserve buses for SR-IOV capability */
 	used_buses = pci_iov_bus_range(bus);

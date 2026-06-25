@@ -3543,6 +3543,41 @@ static int device_private_init(struct device *dev)
 	return 0;
 }
 
+static bool device_hx_stop_after_add_stage(struct device *dev, const char *stage)
+{
+	struct device *parent;
+	char propname[80];
+
+	if (!dev->bus || strcmp(dev->bus->name, "pci"))
+		return false;
+
+	snprintf(propname, sizeof(propname), "hx,stop-after-device-add-%s", stage);
+
+	for (parent = dev; parent; parent = parent->parent) {
+		if (parent->of_node && of_property_read_bool(parent->of_node, propname)) {
+			dev_warn(dev, "HX device_add stopped after %s by device tree\n", stage);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void device_hx_trace_add_stage(struct device *dev, const char *stage)
+{
+	struct device *parent;
+
+	if (!dev->bus || strcmp(dev->bus->name, "pci"))
+		return;
+
+	for (parent = dev; parent; parent = parent->parent) {
+		if (parent->of_node && of_property_read_bool(parent->of_node, "hx,trace-device-add")) {
+			dev_warn(dev, "HX device_add trace: %s\n", stage);
+			return;
+		}
+	}
+}
+
 /**
  * device_add - add device to device hierarchy.
  * @dev: device.
@@ -3631,29 +3666,46 @@ int device_add(struct device *dev)
 		glue_dir = kobj;
 		goto Error;
 	}
+	if (device_hx_stop_after_add_stage(dev, "kobject-add"))
+		goto done;
 
 	/* notify platform of device entry */
 	device_platform_notify(dev);
+	if (device_hx_stop_after_add_stage(dev, "platform-notify"))
+		goto done;
 
 	error = device_create_file(dev, &dev_attr_uevent);
 	if (error)
 		goto attrError;
+	if (device_hx_stop_after_add_stage(dev, "uevent-file"))
+		goto done;
 
 	error = device_add_class_symlinks(dev);
 	if (error)
 		goto SymlinkError;
+	if (device_hx_stop_after_add_stage(dev, "class-symlinks"))
+		goto done;
 	error = device_add_attrs(dev);
 	if (error)
 		goto AttrsError;
+	if (device_hx_stop_after_add_stage(dev, "attrs"))
+		goto done;
 	error = bus_add_device(dev);
 	if (error)
 		goto BusError;
+	if (device_hx_stop_after_add_stage(dev, "bus-add"))
+		goto done;
 	error = dpm_sysfs_add(dev);
 	if (error)
 		goto DPMError;
+	if (device_hx_stop_after_add_stage(dev, "dpm-sysfs"))
+		goto done;
+	device_hx_trace_add_stage(dev, "before device_pm_add");
 	device_pm_add(dev);
+	device_hx_trace_add_stage(dev, "after device_pm_add");
 
 	if (MAJOR(dev->devt)) {
+		device_hx_trace_add_stage(dev, "before devt files");
 		error = device_create_file(dev, &dev_attr_dev);
 		if (error)
 			goto DevAttrError;
@@ -3663,13 +3715,18 @@ int device_add(struct device *dev)
 			goto SysEntryError;
 
 		devtmpfs_create_node(dev);
+		device_hx_trace_add_stage(dev, "after devt files");
 	}
 
 	/* Notify clients of device addition.  This call must come
 	 * after dpm_sysfs_add() and before kobject_uevent().
 	 */
+	device_hx_trace_add_stage(dev, "before bus_notify add");
 	bus_notify(dev, BUS_NOTIFY_ADD_DEVICE);
+	device_hx_trace_add_stage(dev, "after bus_notify add");
+	device_hx_trace_add_stage(dev, "before kobject_uevent add");
 	kobject_uevent(&dev->kobj, KOBJ_ADD);
+	device_hx_trace_add_stage(dev, "after kobject_uevent add");
 
 	/*
 	 * Check if any of the other devices (consumers) have been waiting for
@@ -3684,8 +3741,10 @@ int device_add(struct device *dev)
 	 * device and the driver sync_state callback is called for this device.
 	 */
 	if (dev->fwnode && !dev->fwnode->dev) {
+		device_hx_trace_add_stage(dev, "before fw_devlink_link_device");
 		dev->fwnode->dev = dev;
 		fw_devlink_link_device(dev);
+		device_hx_trace_add_stage(dev, "after fw_devlink_link_device");
 	}
 
 	/*
@@ -3699,11 +3758,15 @@ int device_add(struct device *dev)
 	 * bus_probe_device() -> device_initial_probe() -> __device_attach()
 	 * will notice (under device_lock) that the device is already bound.
 	 */
+	device_hx_trace_add_stage(dev, "before ready_to_probe");
 	device_lock(dev);
 	dev_set_ready_to_probe(dev);
 	device_unlock(dev);
+	device_hx_trace_add_stage(dev, "after ready_to_probe");
 
+	device_hx_trace_add_stage(dev, "before bus_probe_device");
 	bus_probe_device(dev);
+	device_hx_trace_add_stage(dev, "after bus_probe_device");
 
 	/*
 	 * If all driver registration is done and a newly added device doesn't
@@ -3712,10 +3775,12 @@ int device_add(struct device *dev)
 	 */
 	if (dev->fwnode && fw_devlink_drv_reg_done && !dev->can_match)
 		fw_devlink_unblock_consumers(dev);
+	device_hx_trace_add_stage(dev, "after fw_devlink unblock check");
 
 	if (parent)
 		klist_add_tail(&dev->p->knode_parent,
 			       &parent->p->klist_children);
+	device_hx_trace_add_stage(dev, "after parent klist add");
 
 	sp = class_to_subsys(dev->class);
 	if (sp) {

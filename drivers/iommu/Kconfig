@@ -315,6 +315,14 @@ config APPLE_DART
 
 	  Say Y here if you are using an Apple SoC.
 
+config HX_DART
+	tristate "Corellium/Sandcastle Hx DART IOMMU Support"
+	depends on ARCH_APPLE || COMPILE_TEST
+	select IOMMU_API
+	help
+	  Experimental port of the Project Sandcastle A10/T8010 DART path.
+	  This is only for iDevice bring-up work.
+
 config S390_IOMMU
 	def_bool y if S390 && PCI
 	depends on S390 && PCI

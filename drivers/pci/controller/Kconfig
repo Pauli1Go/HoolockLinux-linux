@@ -54,6 +54,16 @@ config PCIE_APPLE
 
 	  If unsure, say Y if you have an Apple Silicon system.
 
+config PCIE_HX
+	tristate "Corellium/Sandcastle Hx PCIe controller"
+	depends on ARCH_APPLE || COMPILE_TEST
+	depends on OF
+	depends on PCI_MSI
+	select PCI_HOST_COMMON
+	help
+	  Experimental port of the Project Sandcastle A10/T8010 PCIe host
+	  bridge path. This is only for iDevice bring-up work.
+
 config PCI_VERSATILE
 	bool "ARM Versatile PB PCI controller"
 	depends on ARCH_VERSATILE || COMPILE_TEST

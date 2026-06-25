@@ -14,6 +14,14 @@ config BLK_DEV_NVME
 	  To compile this driver as a module, choose M here: the
 	  module will be called nvme.
 
+config NVME_HX
+	bool "Corellium/Sandcastle Hx NVMe quirk support"
+	depends on BLK_DEV_NVME
+	depends on PCIE_HX
+	help
+	  Experimental Project Sandcastle A10/T8010 PCIe NVMe quirk path.
+	  This requires hooks in the generic PCI NVMe driver.
+
 config NVME_MULTIPATH
 	bool "NVMe multipath support"
 	depends on NVME_CORE

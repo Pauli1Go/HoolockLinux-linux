@@ -39,6 +39,7 @@ obj-$(CONFIG_PCIE_BRCMSTB) += pcie-brcmstb.o
 obj-$(CONFIG_PCI_LOONGSON) += pci-loongson.o
 obj-$(CONFIG_PCIE_HISI_ERR) += pcie-hisi-error.o
 obj-$(CONFIG_PCIE_APPLE) += pcie-apple.o
+obj-$(CONFIG_PCIE_HX) += pcie-hx.o
 obj-$(CONFIG_PCIE_MT7621) += pcie-mt7621.o
 obj-$(CONFIG_PCIE_ASPEED) += pcie-aspeed.o
 

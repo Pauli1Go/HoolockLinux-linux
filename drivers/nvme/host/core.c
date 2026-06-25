@@ -2710,13 +2710,22 @@ int nvme_enable_ctrl(struct nvme_ctrl *ctrl)
 	unsigned dev_page_min;
 	u32 timeout;
 	int ret;
+	bool hx = ctrl->quirks & NVME_QUIRK_HX_NVME;
 
+	if (hx)
+		dev_warn(ctrl->dev, "HX NVMe enable: before CAP read\n");
 	ret = ctrl->ops->reg_read64(ctrl, NVME_REG_CAP, &ctrl->cap);
+	if (hx)
+		dev_warn(ctrl->dev, "HX NVMe enable: CAP read ret=%d cap=0x%llx\n",
+			 ret, ctrl->cap);
 	if (ret) {
 		dev_err(ctrl->device, "Reading CAP failed (%d)\n", ret);
 		return ret;
 	}
 	dev_page_min = NVME_CAP_MPSMIN(ctrl->cap) + 12;
+	if (hx)
+		dev_warn(ctrl->dev, "HX NVMe enable: page_min=%u host_page=%u\n",
+			 1 << dev_page_min, 1 << NVME_CTRL_PAGE_SHIFT);
 
 	if (NVME_CTRL_PAGE_SHIFT < dev_page_min) {
 		dev_err(ctrl->device,
@@ -2741,20 +2750,49 @@ int nvme_enable_ctrl(struct nvme_ctrl *ctrl)
 	ctrl->ctrl_config |= (NVME_CTRL_PAGE_SHIFT - 12) << NVME_CC_MPS_SHIFT;
 	ctrl->ctrl_config |= NVME_CC_AMS_RR | NVME_CC_SHN_NONE;
 	ctrl->ctrl_config |= NVME_CC_IOSQES | NVME_CC_IOCQES;
+	if (hx)
+		dev_warn(ctrl->dev, "HX NVMe enable: ctrl_config prepared=0x%x\n",
+			 ctrl->ctrl_config);
+
+	if (ctrl->quirks & NVME_QUIRK_HX_NVME) {
+		dev_warn(ctrl->dev, "HX NVMe enable: before hx_preenable\n");
+		ret = nvme_hx_preenable(ctrl, ctrl->dev);
+		dev_warn(ctrl->dev, "HX NVMe enable: hx_preenable ret=%d\n", ret);
+		if (ret)
+			return ret;
+	}
+
+	if (hx)
+		dev_warn(ctrl->dev, "HX NVMe enable: before first CC write 0x%x\n",
+			 ctrl->ctrl_config);
 	ret = ctrl->ops->reg_write32(ctrl, NVME_REG_CC, ctrl->ctrl_config);
+	if (hx)
+		dev_warn(ctrl->dev, "HX NVMe enable: first CC write ret=%d\n", ret);
 	if (ret)
 		return ret;
 
 	/* CAP value may change after initial CC write */
+	if (hx)
+		dev_warn(ctrl->dev, "HX NVMe enable: before second CAP read\n");
 	ret = ctrl->ops->reg_read64(ctrl, NVME_REG_CAP, &ctrl->cap);
+	if (hx)
+		dev_warn(ctrl->dev, "HX NVMe enable: second CAP read ret=%d cap=0x%llx\n",
+			 ret, ctrl->cap);
 	if (ret)
 		return ret;
 
 	timeout = NVME_CAP_TIMEOUT(ctrl->cap);
+	if (hx)
+		dev_warn(ctrl->dev, "HX NVMe enable: timeout=%u\n", timeout);
 	if (ctrl->cap & NVME_CAP_CRMS_CRWMS) {
 		u32 crto, ready_timeout;
 
+		if (hx)
+			dev_warn(ctrl->dev, "HX NVMe enable: before CRTO read\n");
 		ret = ctrl->ops->reg_read32(ctrl, NVME_REG_CRTO, &crto);
+		if (hx)
+			dev_warn(ctrl->dev, "HX NVMe enable: CRTO read ret=%d crto=0x%x\n",
+				 ret, crto);
 		if (ret) {
 			dev_err(ctrl->device, "Reading CRTO failed (%d)\n",
 				ret);
@@ -2776,11 +2814,21 @@ int nvme_enable_ctrl(struct nvme_ctrl *ctrl)
 	}
 
 	ctrl->ctrl_config |= NVME_CC_ENABLE;
+	if (hx)
+		dev_warn(ctrl->dev, "HX NVMe enable: before enable CC write 0x%x\n",
+			 ctrl->ctrl_config);
 	ret = ctrl->ops->reg_write32(ctrl, NVME_REG_CC, ctrl->ctrl_config);
+	if (hx)
+		dev_warn(ctrl->dev, "HX NVMe enable: enable CC write ret=%d\n", ret);
 	if (ret)
 		return ret;
-	return nvme_wait_ready(ctrl, NVME_CSTS_RDY, NVME_CSTS_RDY,
-			       (timeout + 1) / 2, "initialisation");
+	if (hx)
+		dev_warn(ctrl->dev, "HX NVMe enable: before wait_ready\n");
+	ret = nvme_wait_ready(ctrl, NVME_CSTS_RDY, NVME_CSTS_RDY,
+			      (timeout + 1) / 2, "initialisation");
+	if (hx)
+		dev_warn(ctrl->dev, "HX NVMe enable: wait_ready ret=%d\n", ret);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(nvme_enable_ctrl);
 
@@ -3616,6 +3664,9 @@ static int nvme_init_identify(struct nvme_ctrl *ctrl)
 		max_hw_sectors = nvme_mps_to_sectors(ctrl, id->mdts);
 	else
 		max_hw_sectors = UINT_MAX;
+	if (ctrl->quirks & NVME_QUIRK_HX_NVME)
+		max_hw_sectors = min_not_zero(max_hw_sectors,
+					      nvme_hx_max_req_size(ctrl));
 	ctrl->max_hw_sectors =
 		min_not_zero(ctrl->max_hw_sectors, max_hw_sectors);
 

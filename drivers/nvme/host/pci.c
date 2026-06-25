@@ -20,6 +20,7 @@
 #include <linux/mutex.h>
 #include <linux/nodemask.h>
 #include <linux/once.h>
+#include <linux/of.h>
 #include <linux/pci.h>
 #include <linux/suspend.h>
 #include <linux/t10-pi.h>
@@ -444,6 +445,7 @@ struct nvme_iod {
 	size_t meta_total_len;
 	struct dma_iova_state meta_dma_state;
 	struct nvme_sgl_desc *meta_descriptor;
+	void *hx_quirk_req;
 };
 
 static inline unsigned int nvme_dbbuf_size(struct nvme_dev *dev)
@@ -924,6 +926,8 @@ static void nvme_unmap_metadata(struct request *req)
 			      iod->meta_descriptor, iod->meta_dma);
 }
 
+static blk_status_t nvme_pci_hx_unmap_data(struct request *req);
+
 static void nvme_unmap_data(struct request *req)
 {
 	enum pci_p2pdma_map_type map = PCI_P2PDMA_MAP_NONE;
@@ -931,6 +935,13 @@ static void nvme_unmap_data(struct request *req)
 	struct nvme_queue *nvmeq = req->mq_hctx->driver_data;
 	struct device *dma_dev = nvmeq->dev->dev;
 	unsigned int attrs = 0;
+	blk_status_t ret;
+
+	if (nvmeq->dev->ctrl.quirks & NVME_QUIRK_HX_NVME) {
+		ret = nvme_pci_hx_unmap_data(req);
+		if (ret == BLK_STS_OK)
+			return;
+	}
 
 	if (iod->flags & IOD_SINGLE_SEGMENT) {
 		static_assert(offsetof(union nvme_data_ptr, prp1) ==
@@ -958,6 +969,136 @@ static void nvme_unmap_data(struct request *req)
 
 	if (iod->nr_descriptors)
 		nvme_free_descriptors(req);
+}
+
+static blk_status_t nvme_pci_hx_unmap_data(struct request *req)
+{
+	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);
+	struct nvme_queue *nvmeq = req->mq_hctx->driver_data;
+	struct nvme_dev *dev = nvmeq->dev;
+	unsigned int i;
+
+	if (!iod->hx_quirk_req)
+		return BLK_STS_NOTSUPP;
+
+	for (i = 0; i < iod->nr_dma_vecs; i++)
+		dma_unmap_page(dev->dev, iod->dma_vecs[i].addr,
+			       iod->dma_vecs[i].len, rq_dma_dir(req));
+	if (iod->dma_vecs) {
+		mempool_free(iod->dma_vecs, dev->dmavec_mempool);
+		iod->dma_vecs = NULL;
+	}
+	iod->nr_dma_vecs = 0;
+
+	nvme_hx_free_req(&dev->ctrl, dev->dev, iod->hx_quirk_req);
+	iod->hx_quirk_req = NULL;
+	iod->cmd.common.flags &= ~NVME_CMD_HX_FLATDMA;
+	dev_dbg(dev->dev, "HX NVMe flatdma unmap complete\n");
+	return BLK_STS_OK;
+}
+
+static blk_status_t nvme_pci_hx_map_data(struct request *req)
+{
+	enum {
+		HX_NVME_MAX_REQ_PAGES = 256,
+		HX_NVMMU_PAGE_SIZE = 4096,
+	};
+	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);
+	struct nvme_queue *nvmeq = req->mq_hctx->driver_data;
+	struct nvme_dev *dev = nvmeq->dev;
+	struct req_iterator iter;
+	struct bio_vec bv;
+	u64 *pages, flatdma, phys, offs = 0;
+	unsigned tag, npages = 0, consumed = 0;
+	unsigned total = blk_rq_payload_bytes(req);
+	int ret;
+
+	if (!dev->ctrl.quirk_data)
+		return BLK_STS_NOTSUPP;
+
+	ret = nvme_hx_alloc_req(&dev->ctrl, &iod->hx_quirk_req, &tag, &pages);
+	if (ret)
+		return errno_to_blk_status(ret);
+
+	iod->dma_vecs = mempool_alloc(dev->dmavec_mempool, GFP_ATOMIC);
+	if (!iod->dma_vecs) {
+		ret = -ENOMEM;
+		goto out_unmap;
+	}
+
+	rq_for_each_bvec(bv, req, iter) {
+		dma_addr_t dma_addr;
+		unsigned int len = bv.bv_len;
+
+		if (WARN_ON_ONCE(iod->nr_dma_vecs >= blk_rq_nr_phys_segments(req))) {
+			ret = -EIO;
+			goto out_unmap;
+		}
+
+		dma_addr = dma_map_bvec(dev->dev, &bv, rq_dma_dir(req), 0);
+		if (dma_mapping_error(dev->dev, dma_addr)) {
+			ret = -ENOMEM;
+			goto out_unmap;
+		}
+		iod->dma_vecs[iod->nr_dma_vecs].addr = dma_addr;
+		iod->dma_vecs[iod->nr_dma_vecs].len = len;
+		iod->nr_dma_vecs++;
+
+		phys = page_to_phys(bv.bv_page) + bv.bv_offset;
+		if (!consumed) {
+			offs = phys & (HX_NVMMU_PAGE_SIZE - 1);
+			phys -= offs;
+			len += offs;
+		} else if (phys & (HX_NVMMU_PAGE_SIZE - 1)) {
+			dev_err(dev->dev,
+				"HX NVMe flatdma: non-initial segment is not page aligned phys=0x%llx\n",
+				phys);
+			ret = -EIO;
+			goto out_unmap;
+		}
+
+		if (consumed + bv.bv_len != total && (len & (HX_NVMMU_PAGE_SIZE - 1))) {
+			dev_err(dev->dev,
+				"HX NVMe flatdma: non-final segment size is not page aligned len=0x%x\n",
+				len);
+			ret = -EIO;
+			goto out_unmap;
+		}
+
+		while (len) {
+			if (npages >= HX_NVME_MAX_REQ_PAGES) {
+				dev_err(dev->dev, "HX NVMe flatdma: request too large\n");
+				ret = -EIO;
+				goto out_unmap;
+			}
+			pages[npages++] = phys;
+			phys += HX_NVMMU_PAGE_SIZE;
+			if (len > HX_NVMMU_PAGE_SIZE)
+				len -= HX_NVMMU_PAGE_SIZE;
+			else
+				len = 0;
+		}
+		consumed += bv.bv_len;
+	}
+
+	flatdma = nvme_hx_map_req(&dev->ctrl, dev->dev, iod->hx_quirk_req, npages);
+	if (!flatdma) {
+		ret = -EIO;
+		goto out_unmap;
+	}
+
+	iod->total_len = total;
+	iod->cmd.common.flags |= NVME_CMD_HX_FLATDMA;
+	iod->cmd.common.dptr.prp1 = cpu_to_le64(flatdma + offs);
+	iod->cmd.common.dptr.prp2 = 0;
+	dev_dbg(dev->dev,
+		"HX NVMe flatdma mapped: tag=%u npages=%u offs=0x%llx total=%u prp1=0x%llx\n",
+		tag, npages, offs, total, flatdma + offs);
+	return BLK_STS_OK;
+
+out_unmap:
+	nvme_pci_hx_unmap_data(req);
+	return errno_to_blk_status(ret);
 }
 
 static bool nvme_pci_prp_save_mapping(struct request *req,
@@ -1246,6 +1387,12 @@ static blk_status_t nvme_map_data(struct request *req)
 	struct blk_dma_iter iter;
 	blk_status_t ret;
 
+	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME) {
+		ret = nvme_pci_hx_map_data(req);
+		if (ret != BLK_STS_NOTSUPP)
+			return ret;
+	}
+
 	/*
 	 * Try to skip the DMA iterator for single segment requests, as that
 	 * significantly improves performances for small I/O sizes.
@@ -1400,7 +1547,9 @@ static blk_status_t nvme_prep_rq(struct request *req)
 	iod->nr_descriptors = 0;
 	iod->total_len = 0;
 	iod->meta_total_len = 0;
+	iod->dma_vecs = NULL;
 	iod->nr_dma_vecs = 0;
+	iod->hx_quirk_req = NULL;
 
 	ret = nvme_setup_cmd(req->q->queuedata, req);
 	if (ret)
@@ -2165,11 +2314,34 @@ static int queue_request_irq(struct nvme_queue *nvmeq)
 {
 	struct pci_dev *pdev = to_pci_dev(nvmeq->dev->dev);
 	int nr = nvmeq->dev->ctrl.instance;
+	bool hx = nvmeq->dev->ctrl.quirks & NVME_QUIRK_HX_NVME;
+	int irq = pci_irq_vector(pdev, nvmeq->cq_vector);
+
+	if (hx)
+		dev_warn(nvmeq->dev->dev,
+			 "HX NVMe queue_request_irq: qid=%u cq_vector=%u irq=%d instance=%d threaded=%d msi=%d msix=%d legacy_irq=%u num_vecs=%d online=%d\n",
+			 nvmeq->qid, nvmeq->cq_vector, irq, nr,
+			 use_threaded_interrupts, pdev->msi_enabled,
+			 pdev->msix_enabled, pdev->irq, nvmeq->dev->num_vecs,
+			 nvmeq->dev->online_queues);
+
+	if (irq <= 0) {
+		if (hx)
+			dev_warn(nvmeq->dev->dev,
+				 "HX NVMe queue_request_irq: invalid irq %d\n", irq);
+		return irq < 0 ? irq : -EINVAL;
+	}
 
 	if (use_threaded_interrupts) {
+		if (hx)
+			dev_warn(nvmeq->dev->dev,
+				 "HX NVMe queue_request_irq: before threaded pci_request_irq\n");
 		return pci_request_irq(pdev, nvmeq->cq_vector, nvme_irq_check,
 				nvme_irq, nvmeq, "nvme%dq%d", nr, nvmeq->qid);
 	} else {
+		if (hx)
+			dev_warn(nvmeq->dev->dev,
+				 "HX NVMe queue_request_irq: before plain pci_request_irq\n");
 		return pci_request_irq(pdev, nvmeq->cq_vector, nvme_irq,
 				NULL, nvmeq, "nvme%dq%d", nr, nvmeq->qid);
 	}
@@ -2303,6 +2475,8 @@ static unsigned long db_bar_size(struct nvme_dev *dev, unsigned nr_io_queues)
 	return NVME_REG_DBS + ((nr_io_queues + 1) * 8 * dev->db_stride);
 }
 
+static bool nvme_hx_dt_bool(const char *name);
+
 static int nvme_remap_bar(struct nvme_dev *dev, unsigned long size)
 {
 	struct pci_dev *pdev = to_pci_dev(dev->dev);
@@ -2329,17 +2503,35 @@ static int nvme_pci_configure_admin_queue(struct nvme_dev *dev)
 	int result;
 	u32 aqa;
 	struct nvme_queue *nvmeq;
+	bool hx = dev->ctrl.quirks & NVME_QUIRK_HX_NVME;
 
+	if (hx)
+		dev_warn(dev->dev, "HX NVMe admin: before remap_bar\n");
 	result = nvme_remap_bar(dev, db_bar_size(dev, 0));
+	if (hx)
+		dev_warn(dev->dev, "HX NVMe admin: remap_bar result=%d\n", result);
 	if (result < 0)
 		return result;
+	if (hx && nvme_hx_dt_bool("hx,stop-after-admin-remap-bar")) {
+		dev_warn(dev->dev, "HX NVMe probe stopped after admin remap_bar by device tree.\n");
+		return -ECANCELED;
+	}
 
+	if (hx)
+		dev_warn(dev->dev, "HX NVMe admin: before VS/CSTS read\n");
 	dev->subsystem = readl(dev->bar + NVME_REG_VS) >= NVME_VS(1, 1, 0) ?
 				NVME_CAP_NSSRC(dev->ctrl.cap) : 0;
 
 	if (dev->subsystem &&
 	    (readl(dev->bar + NVME_REG_CSTS) & NVME_CSTS_NSSRO))
 		writel(NVME_CSTS_NSSRO, dev->bar + NVME_REG_CSTS);
+	if (hx)
+		dev_warn(dev->dev, "HX NVMe admin: after VS/CSTS read subsystem=%d\n",
+			 dev->subsystem);
+	if (hx && nvme_hx_dt_bool("hx,stop-after-admin-status-read")) {
+		dev_warn(dev->dev, "HX NVMe probe stopped after admin status read by device tree.\n");
+		return -ECANCELED;
+	}
 
 	/*
 	 * If the device has been passed off to us in an enabled state, just
@@ -2348,7 +2540,11 @@ static int nvme_pci_configure_admin_queue(struct nvme_dev *dev)
 	 * commands to the admin queue ... and we don't know what memory that
 	 * might be pointing at!
 	 */
+	if (hx)
+		dev_warn(dev->dev, "HX NVMe admin: before disable_ctrl\n");
 	result = nvme_disable_ctrl(&dev->ctrl, false);
+	if (hx)
+		dev_warn(dev->dev, "HX NVMe admin: disable_ctrl result=%d\n", result);
 	if (result < 0) {
 		struct pci_dev *pdev = to_pci_dev(dev->dev);
 
@@ -2371,10 +2567,22 @@ static int nvme_pci_configure_admin_queue(struct nvme_dev *dev)
 		dev_info(dev->ctrl.device,
 			"controller reset completed after pcie flr\n");
 	}
+	if (hx && nvme_hx_dt_bool("hx,stop-after-admin-disable-ctrl")) {
+		dev_warn(dev->dev, "HX NVMe probe stopped after admin disable_ctrl by device tree.\n");
+		return -ECANCELED;
+	}
 
+	if (hx)
+		dev_warn(dev->dev, "HX NVMe admin: before alloc_queue\n");
 	result = nvme_alloc_queue(dev, 0, NVME_AQ_DEPTH);
+	if (hx)
+		dev_warn(dev->dev, "HX NVMe admin: alloc_queue result=%d\n", result);
 	if (result)
 		return result;
+	if (hx && nvme_hx_dt_bool("hx,stop-after-admin-alloc-queue")) {
+		dev_warn(dev->dev, "HX NVMe probe stopped after admin alloc_queue by device tree.\n");
+		return -ECANCELED;
+	}
 
 	dev->ctrl.numa_node = dev_to_node(dev->dev);
 
@@ -2382,23 +2590,60 @@ static int nvme_pci_configure_admin_queue(struct nvme_dev *dev)
 	aqa = nvmeq->q_depth - 1;
 	aqa |= aqa << 16;
 
+	if (hx)
+		dev_warn(dev->dev,
+			 "HX NVMe admin: before queue register writes sq_dma=%pad cq_dma=%pad aqa=0x%x\n",
+			 &nvmeq->sq_dma_addr, &nvmeq->cq_dma_addr, aqa);
 	writel(aqa, dev->bar + NVME_REG_AQA);
 	lo_hi_writeq(nvmeq->sq_dma_addr, dev->bar + NVME_REG_ASQ);
 	lo_hi_writeq(nvmeq->cq_dma_addr, dev->bar + NVME_REG_ACQ);
+	if (hx)
+		dev_warn(dev->dev, "HX NVMe admin: after queue register writes\n");
+	if (hx && nvme_hx_dt_bool("hx,stop-after-admin-write-queue-regs")) {
+		dev_warn(dev->dev, "HX NVMe probe stopped after admin queue register writes by device tree.\n");
+		return -ECANCELED;
+	}
 
+	if (hx)
+		dev_warn(dev->dev, "HX NVMe admin: before enable_ctrl\n");
 	result = nvme_enable_ctrl(&dev->ctrl);
+	if (hx)
+		dev_warn(dev->dev, "HX NVMe admin: enable_ctrl result=%d\n", result);
 	if (result)
 		return result;
+	if (hx && nvme_hx_dt_bool("hx,stop-after-admin-enable-ctrl")) {
+		dev_warn(dev->dev, "HX NVMe probe stopped after admin enable_ctrl by device tree.\n");
+		return -ECANCELED;
+	}
 
 	nvmeq->cq_vector = 0;
+	if (hx)
+		dev_warn(dev->dev, "HX NVMe admin: before init_queue\n");
 	nvme_init_queue(nvmeq, 0);
+	if (hx)
+		dev_warn(dev->dev, "HX NVMe admin: after init_queue\n");
+	if (hx && nvme_hx_dt_bool("hx,stop-after-admin-init-queue")) {
+		dev_warn(dev->dev, "HX NVMe probe stopped after admin init_queue by device tree.\n");
+		return -ECANCELED;
+	}
+
+	if (hx)
+		dev_warn(dev->dev, "HX NVMe admin: before queue_request_irq\n");
 	result = queue_request_irq(nvmeq);
+	if (hx)
+		dev_warn(dev->dev, "HX NVMe admin: queue_request_irq result=%d\n", result);
 	if (result) {
 		dev->online_queues--;
 		return result;
 	}
+	if (hx && nvme_hx_dt_bool("hx,stop-after-admin-queue-irq")) {
+		dev_warn(dev->dev, "HX NVMe probe stopped after admin queue_request_irq by device tree.\n");
+		return -ECANCELED;
+	}
 
 	set_bit(NVMEQ_ENABLED, &nvmeq->flags);
+	if (hx)
+		dev_warn(dev->dev, "HX NVMe admin: complete\n");
 	return result;
 }
 
@@ -2894,6 +3139,8 @@ static int nvme_setup_irqs(struct nvme_dev *dev, unsigned int nr_io_queues)
 	};
 	unsigned int irq_queues, poll_queues;
 	unsigned int flags = PCI_IRQ_ALL_TYPES | PCI_IRQ_AFFINITY;
+	bool hx = dev->ctrl.quirks & NVME_QUIRK_HX_NVME;
+	int result;
 
 	/*
 	 * Poll queues don't need interrupts, but we need at least one I/O queue
@@ -2919,8 +3166,19 @@ static int nvme_setup_irqs(struct nvme_dev *dev, unsigned int nr_io_queues)
 		irq_queues += (nr_io_queues - poll_queues);
 	if (dev->ctrl.quirks & NVME_QUIRK_BROKEN_MSI)
 		flags &= ~PCI_IRQ_MSI;
-	return pci_alloc_irq_vectors_affinity(pdev, 1, irq_queues, flags,
-					      &affd);
+	if (hx)
+		dev_warn(dev->dev,
+			 "HX NVMe setup_irqs: nr_io=%u poll=%u irq_queues=%u flags=0x%x quirks=0x%lx\n",
+			 nr_io_queues, poll_queues, irq_queues, flags,
+			 dev->ctrl.quirks);
+	result = pci_alloc_irq_vectors_affinity(pdev, 1, irq_queues, flags,
+						&affd);
+	if (hx)
+		dev_warn(dev->dev,
+			 "HX NVMe setup_irqs result=%d num_vecs=%d irq=%u msi=%d msix=%d\n",
+			 result, dev->num_vecs, pdev->irq, pdev->msi_enabled,
+			 pdev->msix_enabled);
+	return result;
 }
 
 static unsigned int nvme_max_io_queues(struct nvme_dev *dev)
@@ -2942,6 +3200,15 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 	unsigned int nr_io_queues;
 	unsigned long size;
 	int result;
+	bool hx = dev->ctrl.quirks & NVME_QUIRK_HX_NVME;
+	bool hx_reuse_single_vector = false;
+
+	if (hx)
+		dev_warn(dev->dev,
+			 "HX NVMe setup_io_queues: enter allocated=%u online=%u queue_count=%d tagset=%p quirks=0x%lx\n",
+			 dev->nr_allocated_queues, dev->online_queues,
+			 dev->ctrl.queue_count, dev->ctrl.tagset,
+			 dev->ctrl.quirks);
 
 	/*
 	 * Sample the module parameters once at reset time so that we have
@@ -2969,7 +3236,16 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 	 */
 	nr_io_queues = min(nvme_max_io_queues(dev),
 			   dev->nr_allocated_queues - 1);
+	if (hx)
+		dev_warn(dev->dev,
+			 "HX NVMe setup_io_queues: before set_queue_count nr_io=%u max_io=%u allocated=%u\n",
+			 nr_io_queues, nvme_max_io_queues(dev),
+			 dev->nr_allocated_queues);
 	result = nvme_set_queue_count(&dev->ctrl, &nr_io_queues);
+	if (hx)
+		dev_warn(dev->dev,
+			 "HX NVMe setup_io_queues: set_queue_count result=%d nr_io=%u\n",
+			 result, nr_io_queues);
 	if (result < 0)
 		return result;
 
@@ -2984,10 +3260,27 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 	 * nvme_dev_disable() path.
 	 */
 	result = nvme_setup_io_queues_trylock(dev);
+	if (hx)
+		dev_warn(dev->dev,
+			 "HX NVMe setup_io_queues: trylock result=%d\n",
+			 result);
 	if (result)
 		return result;
-	if (test_and_clear_bit(NVMEQ_ENABLED, &adminq->flags))
+	hx_reuse_single_vector = hx &&
+		(dev->ctrl.quirks & NVME_QUIRK_SINGLE_VECTOR) &&
+		pdev->msi_enabled &&
+		test_bit(NVMEQ_ENABLED, &adminq->flags);
+	if (hx_reuse_single_vector) {
+		if (hx)
+			dev_warn(dev->dev,
+				 "HX NVMe setup_io_queues: keeping active admin MSI for shared single-vector path irq=%u\n",
+				 pdev->irq);
+	} else if (test_and_clear_bit(NVMEQ_ENABLED, &adminq->flags)) {
+		if (hx)
+			dev_warn(dev->dev,
+				 "HX NVMe setup_io_queues: freeing admin irq before full vector setup\n");
 		pci_free_irq(pdev, 0, adminq);
+	}
 
 	if (dev->cmb_use_sqes) {
 		result = nvme_cmb_qdepth(dev, nr_io_queues,
@@ -3002,7 +3295,15 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 
 	do {
 		size = db_bar_size(dev, nr_io_queues);
+		if (hx)
+			dev_warn(dev->dev,
+				 "HX NVMe setup_io_queues: remap_bar size=0x%lx nr_io=%u\n",
+				 size, nr_io_queues);
 		result = nvme_remap_bar(dev, size);
+		if (hx)
+			dev_warn(dev->dev,
+				 "HX NVMe setup_io_queues: remap_bar result=%d\n",
+				 result);
 		if (!result)
 			break;
 		if (!--nr_io_queues) {
@@ -3014,24 +3315,64 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 
  retry:
 	/* Deregister the admin queue's interrupt */
-	if (test_and_clear_bit(NVMEQ_ENABLED, &adminq->flags))
+	if (hx_reuse_single_vector) {
+		if (hx)
+			dev_warn(dev->dev,
+				 "HX NVMe setup_io_queues: retry keeps active admin irq for shared vector\n");
+	} else if (test_and_clear_bit(NVMEQ_ENABLED, &adminq->flags)) {
+		if (hx)
+			dev_warn(dev->dev,
+				 "HX NVMe setup_io_queues: retry freeing admin irq\n");
 		pci_free_irq(pdev, 0, adminq);
+	}
 
 	/*
 	 * If we enable msix early due to not intx, disable it again before
 	 * setting up the full range we need.
 	 */
-	pci_free_irq_vectors(pdev);
+	if (hx)
+		dev_warn(dev->dev,
+			 "HX NVMe setup_io_queues: before pci_free_irq_vectors msi=%d msix=%d irq=%u\n",
+			 pdev->msi_enabled, pdev->msix_enabled, pdev->irq);
+	if (hx_reuse_single_vector) {
+		result = 1;
+		dev->io_queues[HCTX_TYPE_DEFAULT] = 1;
+		dev->io_queues[HCTX_TYPE_READ] = 0;
+		dev->io_queues[HCTX_TYPE_POLL] = 0;
+		if (hx)
+			dev_warn(dev->dev,
+				 "HX NVMe setup_io_queues: reused existing shared MSI vector irq=%u default=%u read=%u poll=%u\n",
+				 pdev->irq, dev->io_queues[HCTX_TYPE_DEFAULT],
+				 dev->io_queues[HCTX_TYPE_READ],
+				 dev->io_queues[HCTX_TYPE_POLL]);
+	} else {
+		pci_free_irq_vectors(pdev);
+		if (hx)
+			dev_warn(dev->dev,
+				 "HX NVMe setup_io_queues: after pci_free_irq_vectors msi=%d msix=%d irq=%u\n",
+				 pdev->msi_enabled, pdev->msix_enabled, pdev->irq);
 
-	result = nvme_setup_irqs(dev, nr_io_queues);
-	if (result <= 0) {
-		result = -EIO;
-		goto out_unlock;
+		result = nvme_setup_irqs(dev, nr_io_queues);
+		if (hx)
+			dev_warn(dev->dev,
+				 "HX NVMe setup_io_queues: setup_irqs returned %d\n",
+				 result);
+		if (result <= 0) {
+			result = -EIO;
+			goto out_unlock;
+		}
 	}
 
 	dev->num_vecs = result;
 	result = max(result - 1, 1);
 	dev->max_qid = result + dev->io_queues[HCTX_TYPE_POLL];
+	if (hx)
+		dev_warn(dev->dev,
+			 "HX NVMe setup_io_queues: num_vecs=%d max_qid=%u ioq_default=%u read=%u poll=%u\n",
+			 dev->num_vecs, dev->max_qid,
+			 dev->io_queues[HCTX_TYPE_DEFAULT],
+			 dev->io_queues[HCTX_TYPE_READ],
+			 dev->io_queues[HCTX_TYPE_POLL]);
 
 	/*
 	 * Should investigate if there's a performance win from allocating
@@ -3039,13 +3380,35 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 	 * path to scale better, even if the receive path is limited by the
 	 * number of interrupts.
 	 */
-	result = queue_request_irq(adminq);
-	if (result)
-		goto out_unlock;
-	set_bit(NVMEQ_ENABLED, &adminq->flags);
+	if (hx)
+		dev_warn(dev->dev,
+			 "HX NVMe setup_io_queues: before admin queue_request_irq\n");
+	if (hx_reuse_single_vector) {
+		result = 0;
+		if (hx)
+			dev_warn(dev->dev,
+				 "HX NVMe setup_io_queues: admin irq already registered, skipping duplicate request\n");
+	} else {
+		result = queue_request_irq(adminq);
+		if (hx)
+			dev_warn(dev->dev,
+				 "HX NVMe setup_io_queues: admin queue_request_irq result=%d\n",
+				 result);
+		if (result)
+			goto out_unlock;
+		set_bit(NVMEQ_ENABLED, &adminq->flags);
+	}
 	mutex_unlock(&dev->shutdown_lock);
 
+	if (hx)
+		dev_warn(dev->dev,
+			 "HX NVMe setup_io_queues: before create_io_queues max_qid=%u online=%u\n",
+			 dev->max_qid, dev->online_queues);
 	result = nvme_create_io_queues(dev);
+	if (hx)
+		dev_warn(dev->dev,
+			 "HX NVMe setup_io_queues: create_io_queues result=%d online=%u max_qid=%u\n",
+			 result, dev->online_queues, dev->max_qid);
 	if (result || dev->online_queues < 2)
 		return result;
 
@@ -3064,6 +3427,10 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 					dev->io_queues[HCTX_TYPE_POLL]);
 	return 0;
 out_unlock:
+	if (hx)
+		dev_warn(dev->dev,
+			 "HX NVMe setup_io_queues: out_unlock result=%d\n",
+			 result);
 	mutex_unlock(&dev->shutdown_lock);
 	return result;
 }
@@ -3184,6 +3551,20 @@ static bool nvme_pci_update_nr_queues(struct nvme_dev *dev)
 	return true;
 }
 
+static bool nvme_hx_dt_bool(const char *name)
+{
+	struct device_node *node;
+	bool ret;
+
+	node = of_find_compatible_node(NULL, NULL, "hx,pcie-h9p");
+	if (!node)
+		return false;
+
+	ret = of_property_read_bool(node, name);
+	of_node_put(node);
+	return ret;
+}
+
 static int nvme_pci_enable(struct nvme_dev *dev)
 {
 	int result = -ENOMEM;
@@ -3208,7 +3589,12 @@ static int nvme_pci_enable(struct nvme_dev *dev)
 	 */
 	if (dev->ctrl.quirks & NVME_QUIRK_BROKEN_MSI)
 		flags &= ~PCI_IRQ_MSI;
+	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME)
+		dev_warn(&pdev->dev, "HX NVMe requesting setup IRQ vector: flags=0x%x msi_cap=0x%x msix_cap=0x%x irq=%d\n",
+			 flags, pdev->msi_cap, pdev->msix_cap, pdev->irq);
 	result = pci_alloc_irq_vectors(pdev, 1, 1, flags);
+	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME)
+		dev_warn(&pdev->dev, "HX NVMe setup IRQ vector result=%d\n", result);
 	if (result < 0)
 		goto disable;
 
@@ -3249,13 +3635,56 @@ static int nvme_pci_enable(struct nvme_dev *dev)
 		dev_warn(dev->ctrl.device, "IO queue depth clamped to %d\n",
 			 dev->q_depth);
 	}
+
+	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME) {
+		u32 hx_q_depth = nvme_hx_max_queue_depth(&dev->ctrl);
+
+		if (hx_q_depth && dev->q_depth > hx_q_depth) {
+			dev->q_depth = hx_q_depth;
+			dev_warn(dev->ctrl.device,
+				 "HX NVMe IO queue depth clamped to %u flatdma slots\n",
+				 dev->q_depth);
+		}
+	}
 	dev->ctrl.sqsize = dev->q_depth - 1; /* 0's based queue depth */
 
+	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME) {
+		dev_warn(&pdev->dev, "HX NVMe calling preinit\n");
+		result = nvme_hx_preinit(&dev->ctrl, dev->dev);
+		dev_warn(&pdev->dev, "HX NVMe preinit result=%d\n", result);
+		if (result)
+			goto free_irq;
+	}
+
+	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME)
+		dev_warn(&pdev->dev, "HX NVMe before nvme_map_cmb\n");
 	nvme_map_cmb(dev);
+	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME) {
+		dev_warn(&pdev->dev, "HX NVMe after nvme_map_cmb\n");
+		if (nvme_hx_dt_bool("hx,stop-after-nvme-map-cmb")) {
+			dev_warn(&pdev->dev, "HX NVMe probe stopped after nvme_map_cmb by device tree.\n");
+			result = -ECANCELED;
+			goto free_irq;
+		}
+	}
 
+	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME)
+		dev_warn(&pdev->dev, "HX NVMe before pci_save_state\n");
 	pci_save_state(pdev);
+	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME) {
+		dev_warn(&pdev->dev, "HX NVMe after pci_save_state\n");
+		if (nvme_hx_dt_bool("hx,stop-after-nvme-pci-save-state")) {
+			dev_warn(&pdev->dev, "HX NVMe probe stopped after pci_save_state by device tree.\n");
+			result = -ECANCELED;
+			goto free_irq;
+		}
+	}
 
+	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME)
+		dev_warn(&pdev->dev, "HX NVMe before configure_admin_queue\n");
 	result = nvme_pci_configure_admin_queue(dev);
+	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME)
+		dev_warn(&pdev->dev, "HX NVMe configure_admin_queue result=%d\n", result);
 	if (result)
 		goto free_irq;
 	return result;
@@ -4271,6 +4700,10 @@ static const struct pci_device_id nvme_id_table[] = {
 		 */
 		.driver_data = NVME_QUIRK_SINGLE_VECTOR |
 				NVME_QUIRK_QDEPTH_ONE },
+	{ PCI_DEVICE(PCI_VENDOR_ID_APPLE, 0x2002),
+		.driver_data = NVME_QUIRK_HX_NVME |
+				NVME_QUIRK_SINGLE_VECTOR |
+				NVME_QUIRK_SHARED_TAGS },
 	{ PCI_DEVICE(PCI_VENDOR_ID_APPLE, 0x2003) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_APPLE, 0x2005),
 		.driver_data = NVME_QUIRK_SINGLE_VECTOR |

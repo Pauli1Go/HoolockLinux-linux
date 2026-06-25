@@ -12,3 +12,141 @@
  * now.
  */
 #include "t8010-ipad6.dtsi"
+
+/ {
+	reserved-memory {
+		pcie0sart: pcie0-sart@8bee00000 {
+			compatible = "hx,nvme-scratch";
+			reg = <0x8 0xbee00000 0x0 0x01200000>;
+			iova = <0xbc000000>;
+			no-map;
+		};
+	};
+
+	soc {
+		pcie0dart: dart-pcie0@601008000 {
+			compatible = "hx,dart";
+			reg = <0x6 0x01008000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 271 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&ps_pcie>;
+			pcie-dart;
+			#iommu-cells = <1>;
+		};
+
+		pcie1dart: dart-pcie1@602008000 {
+			compatible = "hx,dart";
+			reg = <0x6 0x02008000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 274 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&ps_pcie>;
+			pcie-dart;
+			#iommu-cells = <1>;
+		};
+
+		pcie2dart: dart-pcie2@603008000 {
+			compatible = "hx,dart";
+			reg = <0x6 0x03008000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 277 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&ps_pcie>;
+			pcie-dart;
+			#iommu-cells = <1>;
+		};
+
+		pcie3dart: dart-pcie3@604008000 {
+			compatible = "hx,dart";
+			reg = <0x6 0x04008000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 280 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&ps_pcie>;
+			pcie-dart;
+			#iommu-cells = <1>;
+		};
+
+		pcie: pcie@610000000 {
+			compatible = "hx,pcie-h9p";
+			status = "okay";
+			reg = <0x6 0x10000000 0x0 0x1000000>,
+			      <0x6 0x00000000 0x0 0x8000>,
+			      <0x6 0x00008000 0x0 0x4000>,
+			      <0x6 0x0a000000 0x0 0x40000>,
+			      <0x6 0x01000000 0x0 0x4000>,
+			      <0x6 0x02000000 0x0 0x4000>,
+			      <0x6 0x03000000 0x0 0x4000>,
+			      <0x6 0x04000000 0x0 0x4000>,
+			      <0x6 0x01004000 0x0 0x4000>,
+			      <0x6 0x00010000 0x0 0x8000>,
+			      <0x2 0x0e000000 0x0 0x100000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 270 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 273 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 276 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 279 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 288 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 289 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 290 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 291 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 292 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 293 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 294 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 295 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 296 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 297 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 298 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 299 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 300 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 301 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 302 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 303 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 304 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 305 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 306 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 307 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 308 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 309 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 310 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 311 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 312 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 313 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 314 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 315 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 316 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 317 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 318 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 319 IRQ_TYPE_EDGE_RISING>,
+				     <AIC_IRQ 272 IRQ_TYPE_EDGE_RISING>;
+			clocks = <&clkref>, <&clkref>, <&clkref>;
+			clock-names = "core", "aux", "ref";
+			power-domains = <&ps_pcie>, <&ps_pcie_aux>, <&ps_pcie_ref>;
+			power-domain-names = "core", "aux", "ref";
+			perst-gpios = <&pinctrl_ap 12 GPIO_ACTIVE_HIGH>,
+				      <&pinctrl_ap 13 GPIO_ACTIVE_HIGH>,
+				      <&pinctrl_ap 14 GPIO_ACTIVE_HIGH>,
+				      <&pinctrl_ap 15 GPIO_ACTIVE_HIGH>;
+			clkreq-gpios = <&pinctrl_ap 16 GPIO_ACTIVE_HIGH>,
+				       <&pinctrl_ap 17 GPIO_ACTIVE_HIGH>,
+				       <&pinctrl_ap 18 GPIO_ACTIVE_HIGH>,
+				       <&pinctrl_ap 19 GPIO_ACTIVE_HIGH>;
+			debug-gpios = <&pinctrl_ap 206 GPIO_ACTIVE_HIGH>;
+			#address-cells = <3>;
+			#size-cells = <2>;
+			#interrupt-cells = <1>;
+			interrupt-controller;
+			device_type = "pci";
+			msi-controller;
+			msi-parent = <&pcie>;
+			msi-doorbell = <0x0 0xbffff000>;
+			ranges = <0x03000000 0x0 0xc0000000 0x7 0xc0000000 0x0 0x40000000>;
+			bus-range = <0x00 0x0f>;
+			iommu-map = <0x0000 &pcie0dart 0x8000 0x0100>,
+				    <0x0100 &pcie0dart 0x0000 0x0100>,
+				    <0x0200 &pcie2dart 0x0000 0x0100>;
+			sart-regions = <&pcie0sart>;
+				sart-map = <1 0 0 0>;
+				hx,apply-raw-pmgr-gates;
+				hx,apply-pcieclk-postup;
+				devpwr-on-0 = <>;
+			};
+	};
+};
