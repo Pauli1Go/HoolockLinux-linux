@@ -132,7 +132,7 @@ int nvme_hx_preinit(struct nvme_ctrl *ctrl, struct device *dev)
     struct nvme_hx_quirk_data *qd;
     int has_iova;
 
-    dev_warn(dev, "HX NVMe preinit start\n");
+    dev_dbg(dev, "HX NVMe preinit start\n");
 
     pci_write_config_byte(to_pci_dev(ctrl->dev), 0x00D, 0x40);          /* latency timer */
     pci_write_config_dword(to_pci_dev(ctrl->dev), 0x17C, 0x10081008);   /* max snoop / no-snoop latency */
@@ -205,9 +205,9 @@ int nvme_hx_preinit(struct nvme_ctrl *ctrl, struct device *dev)
     } else
         scratch_base_dma = scratch_iova;
 
-    dev_warn(dev, "Hx NVMe device: scratch 0x%x@0x%llx|0x%llx[0x%x], log 0x%x:0x%llx\n", scratch_size, scratch_base, scratch_base_dma, scratch_align, core_mask, log_size);
+    dev_dbg(dev, "Hx NVMe device: scratch 0x%x@0x%llx|0x%llx[0x%x], log 0x%x:0x%llx\n", scratch_size, scratch_base, scratch_base_dma, scratch_align, core_mask, log_size);
 
-    dev_warn(dev, "HX NVMe preinit: allocating quirk data\n");
+    dev_dbg(dev, "HX NVMe preinit: allocating quirk data\n");
     qd = devm_kzalloc(dev, sizeof(*qd), GFP_KERNEL);
     if(!qd) {
         dev_err(dev, "out of memory for Hx NVMe quirk data\n");
@@ -221,7 +221,7 @@ int nvme_hx_preinit(struct nvme_ctrl *ctrl, struct device *dev)
 
     spin_lock_init(&qd->used_req_lock);
 
-    dev_warn(dev, "HX NVMe preinit complete\n");
+    dev_dbg(dev, "HX NVMe preinit complete\n");
     if(nvme_hx_dt_bool("hx,stop-after-nvme-hx-preinit")) {
         dev_warn(dev, "HX NVMe probe stopped after HX preinit by device tree.\n");
         return -ECANCELED;
@@ -234,28 +234,28 @@ int nvme_hx_preenable(struct nvme_ctrl *ctrl, struct device *dev)
 {
     struct nvme_hx_quirk_data *qd = ctrl->quirk_data;
 
-    dev_warn(dev, "HX NVMe preenable start\n");
+    dev_dbg(dev, "HX NVMe preenable start\n");
     if(!qd) {
-        dev_err(dev, "Hx NVMe quirk data missing");
+        dev_err(dev, "Hx NVMe quirk data missing\n");
         return -EINVAL;
     }
 
-    dev_warn(dev, "HX NVMe preenable: before REG_INIT\n");
+    dev_dbg(dev, "HX NVMe preenable: before REG_INIT\n");
     ctrl->ops->reg_write32(ctrl, REG_INIT, REG_INIT_REGULAR);
-    dev_warn(dev, "HX NVMe preenable: before scratch base lo=0x%llx\n", qd->scratch_base_dma);
+    dev_dbg(dev, "HX NVMe preenable: before scratch base lo=0x%llx\n", qd->scratch_base_dma);
     ctrl->ops->reg_write32(ctrl, REG_SCRATCH_BASE_LO, qd->scratch_base_dma & 0xFFFFFFFFul);
-    dev_warn(dev, "HX NVMe preenable: before scratch base hi=0x%llx\n", qd->scratch_base_dma >> 32);
+    dev_dbg(dev, "HX NVMe preenable: before scratch base hi=0x%llx\n", qd->scratch_base_dma >> 32);
     ctrl->ops->reg_write32(ctrl, REG_SCRATCH_BASE_HI, qd->scratch_base_dma >> 32);
-    dev_warn(dev, "HX NVMe preenable: before scratch size=0x%x\n", qd->scratch_size);
+    dev_dbg(dev, "HX NVMe preenable: before scratch size=0x%x\n", qd->scratch_size);
     ctrl->ops->reg_write32(ctrl, REG_SCRATCH_SIZE, qd->scratch_size);
-    dev_warn(dev, "HX NVMe preenable complete\n");
+    dev_dbg(dev, "HX NVMe preenable complete\n");
 
     return 0;
 }
 
 u32 nvme_hx_max_req_size(struct nvme_ctrl *ctrl)
 {
-    return 256;
+    return MAX_REQ_PAGES * (NVMMU_PAGE_SIZE / 512);
 }
 
 u32 nvme_hx_max_queue_depth(struct nvme_ctrl *ctrl)

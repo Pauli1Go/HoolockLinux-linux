@@ -96,7 +96,7 @@ struct pcie_hx {
     } msi[NUM_MSI];
     struct pcie_hx_port {
         struct pcie_hx *pcie;
-    } port[NUM_MSI];
+    } port[NUM_PORT];
 };
 
 struct pcie_hx_tunable {
@@ -153,19 +153,17 @@ static void pcie_hx_msi_isr(struct irq_desc *desc)
     unsigned idx = pciemsi - pcie->msi, virq;
 
     chained_irq_enter(chip, desc);
-    spin_lock(&pcie->used_msi_lock);
 
     virq = irq_find_mapping(pcie->irq_dom, idx);
-    generic_handle_irq(virq);
-
-    spin_unlock(&pcie->used_msi_lock);
+    if(virq)
+        generic_handle_irq(virq);
     chained_irq_exit(chip, desc);
 }
 
 static void pcie_hx_compose_msi_msg(struct irq_data *d, struct msi_msg *msg)
 {
     struct pcie_hx *pcie = d->chip_data;
-    pr_warn("pcie-hx MSI compose: irq=%u hwirq=%lu chip_data=%p\n",
+    pr_debug("pcie-hx MSI compose: irq=%u hwirq=%lu chip_data=%p\n",
         d->irq, d->hwirq, pcie);
     if(!pcie) {
         memset(msg, 0, sizeof(*msg));
@@ -174,17 +172,17 @@ static void pcie_hx_compose_msi_msg(struct irq_data *d, struct msi_msg *msg)
     msg->address_lo = lower_32_bits(pcie->msi_doorbell);
     msg->address_hi = upper_32_bits(pcie->msi_doorbell);
     msg->data = d->hwirq;
-    pr_warn("pcie-hx MSI compose done: addr=%08x:%08x data=0x%x\n",
+    pr_debug("pcie-hx MSI compose done: addr=%08x:%08x data=0x%x\n",
         msg->address_hi, msg->address_lo, msg->data);
 }
 
 static void pcie_hx_write_msi_msg(struct irq_data *d, struct msi_msg *msg)
 {
-    pr_warn("pcie-hx MSI write_msg: irq=%u hwirq=%lu chip=%s msg=%08x:%08x data=0x%x\n",
+    pr_debug("pcie-hx MSI write_msg: irq=%u hwirq=%lu chip=%s msg=%08x:%08x data=0x%x\n",
         d->irq, d->hwirq, d->chip && d->chip->name ? d->chip->name : "<none>",
         msg->address_hi, msg->address_lo, msg->data);
     pci_write_msi_msg(d->irq, msg);
-    pr_warn("pcie-hx MSI write_msg done: irq=%u\n", d->irq);
+    pr_debug("pcie-hx MSI write_msg done: irq=%u\n", d->irq);
 }
 
 static int pcie_hx_set_affinity(struct irq_data *d, const struct cpumask *mask, bool force)
@@ -199,23 +197,23 @@ static void pcie_hx_ack_irq(struct irq_data *d)
 static void pcie_hx_mask_irq(struct irq_data *d)
 {
     struct pcie_hx *pcie = d->chip_data;
-    pr_warn("pcie-hx MSI mask: irq=%u hwirq=%lu chip_data=%p\n",
+    pr_debug("pcie-hx MSI mask: irq=%u hwirq=%lu chip_data=%p\n",
         d->irq, d->hwirq, pcie);
     if(!pcie || d->hwirq >= NUM_MSI || pcie->msi[d->hwirq].virq <= 0) {
-        pr_warn("pcie-hx MSI mask skipped: hwirq=%lu parent_virq=%d\n",
+        pr_debug("pcie-hx MSI mask skipped: hwirq=%lu parent_virq=%d\n",
             d->hwirq, pcie && d->hwirq < NUM_MSI ? pcie->msi[d->hwirq].virq : -1);
         return;
     }
-    disable_irq(pcie->msi[d->hwirq].virq);
+    disable_irq_nosync(pcie->msi[d->hwirq].virq);
 }
 
 static void pcie_hx_unmask_irq(struct irq_data *d)
 {
     struct pcie_hx *pcie = d->chip_data;
-    pr_warn("pcie-hx MSI unmask: irq=%u hwirq=%lu chip_data=%p\n",
+    pr_debug("pcie-hx MSI unmask: irq=%u hwirq=%lu chip_data=%p\n",
         d->irq, d->hwirq, pcie);
     if(!pcie || d->hwirq >= NUM_MSI || pcie->msi[d->hwirq].virq <= 0) {
-        pr_warn("pcie-hx MSI unmask skipped: hwirq=%lu parent_virq=%d\n",
+        pr_debug("pcie-hx MSI unmask skipped: hwirq=%lu parent_virq=%d\n",
             d->hwirq, pcie && d->hwirq < NUM_MSI ? pcie->msi[d->hwirq].virq : -1);
         return;
     }
@@ -277,7 +275,7 @@ static int pcie_hx_irq_domain_alloc(struct irq_domain *dom, unsigned int virq, u
             bus = pdev->bus->number;
     }
 
-    pr_warn("pcie-hx MSI alloc: virq=%u nr=%u desc=%p dev=%s hwirq=%llu bus=%u devfn=0x%02x\n",
+    pr_debug("pcie-hx MSI alloc: virq=%u nr=%u desc=%p dev=%s hwirq=%llu bus=%u devfn=0x%02x\n",
         virq, nr_irqs, desc, desc && desc->dev ? dev_name(desc->dev) : "<none>",
         info ? (unsigned long long)info->hwirq : 0, bus, pdev ? pdev->devfn : 0xff);
 
@@ -296,13 +294,13 @@ static int pcie_hx_irq_domain_alloc(struct irq_domain *dom, unsigned int virq, u
     pos = find_first_zero_bit(pcie->used_msi[port], MSI_PER_PORT);
     if(pos >= MSI_PER_PORT) {
         spin_unlock_irqrestore(&pcie->used_msi_lock, flags);
-        pr_warn("pcie-hx MSI alloc failed: port=%u has no free slots\n", port);
+        pr_debug("pcie-hx MSI alloc failed: port=%u has no free slots\n", port);
         return -ENOSPC;
     }
     __set_bit(pos, pcie->used_msi[port]);
     spin_unlock_irqrestore(&pcie->used_msi_lock, flags);
     irq_domain_set_info(dom, virq, pos + MSI_PER_PORT * port, &pcie_hx_msi_chip, pcie, handle_edge_irq, NULL, NULL);
-    pr_warn("pcie-hx MSI alloc done: port=%u slot=%d hwirq=%u\n", port, pos, pos + MSI_PER_PORT * port);
+    pr_debug("pcie-hx MSI alloc done: port=%u slot=%d hwirq=%u\n", port, pos, pos + MSI_PER_PORT * port);
 
     return 0;
 }
@@ -314,17 +312,17 @@ static void pcie_hx_irq_domain_free(struct irq_domain *dom, unsigned int virq, u
     struct pcie_hx *pcie = d ? d->chip_data : NULL;
     unsigned i, port;
 
-    pr_warn("pcie-hx MSI free: virq=%u nr=%u data=%p chip_data=%p\n",
+    pr_debug("pcie-hx MSI free: virq=%u nr=%u data=%p chip_data=%p\n",
         virq, nr_irqs, d, pcie);
     if(!d || !pcie) {
-        pr_warn("pcie-hx MSI free skipped: missing irq data\n");
+        pr_debug("pcie-hx MSI free skipped: missing irq data\n");
         return;
     }
 
     spin_lock_irqsave(&pcie->used_msi_lock, flags);
     for(i=0; i<nr_irqs; i++) {
         port = (d->hwirq + i) / MSI_PER_PORT;
-        pr_warn("pcie-hx MSI free slot: hwirq=%lu port=%u slot=%lu\n",
+        pr_debug("pcie-hx MSI free slot: hwirq=%lu port=%u slot=%lu\n",
             d->hwirq + i, port, d->hwirq + i - port * MSI_PER_PORT);
         __clear_bit(d->hwirq + i - port * MSI_PER_PORT, pcie->used_msi[port]);
     }
@@ -397,7 +395,7 @@ u64 pcie_hx_map_nvmmu(struct device *dev, unsigned tag, unsigned npages, u64 *pa
     u32 *tcb;
     u32 *sgl;
 
-    if(tag >= MAX_SGL_TAG || npages >= MAX_SGL_SIZE)
+    if(tag >= MAX_SGL_TAG || npages > MAX_SGL_SIZE)
         return 0;
 
     if(!dev->bus)
@@ -409,7 +407,8 @@ u64 pcie_hx_map_nvmmu(struct device *dev, unsigned tag, unsigned npages, u64 *pa
     rdev = rdev->parent;
 
     pcie = dev_get_drvdata(rdev);
-    if(!pcie->sart[port].tcb)
+    if(!pcie || port >= NUM_PORT || !pcie->sart[port].base ||
+            !pcie->sart[port].tcb || !pcie->sart[port].tcb_sgl)
         return 0;
 
     tcb = pcie->sart[port].tcb + (tag << 7);

@@ -248,6 +248,7 @@ static struct iommu_domain *hx_dart_iommu_domain_alloc_paging(struct device *dev
 
     idom->domain.pgsize_bitmap = SZ_4K;
     INIT_LIST_HEAD(&idom->devices);
+    spin_lock_init(&idom->list_lock);
 
     idom->sid = -1;
 
@@ -342,16 +343,25 @@ static int hx_dart_iommu_map_pages(struct iommu_domain *domain,
 {
     struct hx_dart_iommu_domain *idom = to_hx_dart_iommu_domain(domain);
     struct hx_dart_iommu *im = idom->iommu;
-    unsigned i, npg = (pgsize * pgcount + DART_PAGE_MASK) >> DART_PAGE_SHIFT;
+    u64 len = (u64)pgsize * pgcount;
+    u64 end = iova + len - 1;
+    unsigned i, npg;
     unsigned long flags;
     u64 *ptep;
     int ret = 0;
 
-    if(idom->sid < 0)
-        return 0;
+    if(!im || idom->sid < 0)
+        return -EINVAL;
+
+    if(!len || end < iova ||
+            iova < domain->geometry.aperture_start ||
+            end > domain->geometry.aperture_end)
+        return -EINVAL;
+
+    npg = (len + DART_PAGE_MASK) >> DART_PAGE_SHIFT;
 
     if(iova < im->iova_offset)
-        return 0;
+        return -EINVAL;
     iova -= im->iova_offset;
 
     spin_lock_irqsave(&im->dart_lock, flags);

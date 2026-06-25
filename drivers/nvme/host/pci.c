@@ -3167,14 +3167,14 @@ static int nvme_setup_irqs(struct nvme_dev *dev, unsigned int nr_io_queues)
 	if (dev->ctrl.quirks & NVME_QUIRK_BROKEN_MSI)
 		flags &= ~PCI_IRQ_MSI;
 	if (hx)
-		dev_warn(dev->dev,
+		dev_dbg(dev->dev,
 			 "HX NVMe setup_irqs: nr_io=%u poll=%u irq_queues=%u flags=0x%x quirks=0x%lx\n",
 			 nr_io_queues, poll_queues, irq_queues, flags,
 			 dev->ctrl.quirks);
 	result = pci_alloc_irq_vectors_affinity(pdev, 1, irq_queues, flags,
 						&affd);
 	if (hx)
-		dev_warn(dev->dev,
+		dev_dbg(dev->dev,
 			 "HX NVMe setup_irqs result=%d num_vecs=%d irq=%u msi=%d msix=%d\n",
 			 result, dev->num_vecs, pdev->irq, pdev->msi_enabled,
 			 pdev->msix_enabled);
@@ -3204,7 +3204,7 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 	bool hx_reuse_single_vector = false;
 
 	if (hx)
-		dev_warn(dev->dev,
+		dev_dbg(dev->dev,
 			 "HX NVMe setup_io_queues: enter allocated=%u online=%u queue_count=%d tagset=%p quirks=0x%lx\n",
 			 dev->nr_allocated_queues, dev->online_queues,
 			 dev->ctrl.queue_count, dev->ctrl.tagset,
@@ -3237,13 +3237,13 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 	nr_io_queues = min(nvme_max_io_queues(dev),
 			   dev->nr_allocated_queues - 1);
 	if (hx)
-		dev_warn(dev->dev,
+		dev_dbg(dev->dev,
 			 "HX NVMe setup_io_queues: before set_queue_count nr_io=%u max_io=%u allocated=%u\n",
 			 nr_io_queues, nvme_max_io_queues(dev),
 			 dev->nr_allocated_queues);
 	result = nvme_set_queue_count(&dev->ctrl, &nr_io_queues);
 	if (hx)
-		dev_warn(dev->dev,
+		dev_dbg(dev->dev,
 			 "HX NVMe setup_io_queues: set_queue_count result=%d nr_io=%u\n",
 			 result, nr_io_queues);
 	if (result < 0)
@@ -3261,7 +3261,7 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 	 */
 	result = nvme_setup_io_queues_trylock(dev);
 	if (hx)
-		dev_warn(dev->dev,
+		dev_dbg(dev->dev,
 			 "HX NVMe setup_io_queues: trylock result=%d\n",
 			 result);
 	if (result)
@@ -3272,12 +3272,12 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 		test_bit(NVMEQ_ENABLED, &adminq->flags);
 	if (hx_reuse_single_vector) {
 		if (hx)
-			dev_warn(dev->dev,
+			dev_dbg(dev->dev,
 				 "HX NVMe setup_io_queues: keeping active admin MSI for shared single-vector path irq=%u\n",
 				 pdev->irq);
 	} else if (test_and_clear_bit(NVMEQ_ENABLED, &adminq->flags)) {
 		if (hx)
-			dev_warn(dev->dev,
+			dev_dbg(dev->dev,
 				 "HX NVMe setup_io_queues: freeing admin irq before full vector setup\n");
 		pci_free_irq(pdev, 0, adminq);
 	}
@@ -3296,12 +3296,12 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 	do {
 		size = db_bar_size(dev, nr_io_queues);
 		if (hx)
-			dev_warn(dev->dev,
+			dev_dbg(dev->dev,
 				 "HX NVMe setup_io_queues: remap_bar size=0x%lx nr_io=%u\n",
 				 size, nr_io_queues);
 		result = nvme_remap_bar(dev, size);
 		if (hx)
-			dev_warn(dev->dev,
+			dev_dbg(dev->dev,
 				 "HX NVMe setup_io_queues: remap_bar result=%d\n",
 				 result);
 		if (!result)
@@ -3313,15 +3313,15 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 	} while (1);
 	adminq->q_db = dev->dbs;
 
- retry:
+retry:
 	/* Deregister the admin queue's interrupt */
 	if (hx_reuse_single_vector) {
 		if (hx)
-			dev_warn(dev->dev,
+			dev_dbg(dev->dev,
 				 "HX NVMe setup_io_queues: retry keeps active admin irq for shared vector\n");
 	} else if (test_and_clear_bit(NVMEQ_ENABLED, &adminq->flags)) {
 		if (hx)
-			dev_warn(dev->dev,
+			dev_dbg(dev->dev,
 				 "HX NVMe setup_io_queues: retry freeing admin irq\n");
 		pci_free_irq(pdev, 0, adminq);
 	}
@@ -3331,7 +3331,7 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 	 * setting up the full range we need.
 	 */
 	if (hx)
-		dev_warn(dev->dev,
+		dev_dbg(dev->dev,
 			 "HX NVMe setup_io_queues: before pci_free_irq_vectors msi=%d msix=%d irq=%u\n",
 			 pdev->msi_enabled, pdev->msix_enabled, pdev->irq);
 	if (hx_reuse_single_vector) {
@@ -3340,7 +3340,7 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 		dev->io_queues[HCTX_TYPE_READ] = 0;
 		dev->io_queues[HCTX_TYPE_POLL] = 0;
 		if (hx)
-			dev_warn(dev->dev,
+			dev_dbg(dev->dev,
 				 "HX NVMe setup_io_queues: reused existing shared MSI vector irq=%u default=%u read=%u poll=%u\n",
 				 pdev->irq, dev->io_queues[HCTX_TYPE_DEFAULT],
 				 dev->io_queues[HCTX_TYPE_READ],
@@ -3348,13 +3348,13 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 	} else {
 		pci_free_irq_vectors(pdev);
 		if (hx)
-			dev_warn(dev->dev,
+			dev_dbg(dev->dev,
 				 "HX NVMe setup_io_queues: after pci_free_irq_vectors msi=%d msix=%d irq=%u\n",
 				 pdev->msi_enabled, pdev->msix_enabled, pdev->irq);
 
 		result = nvme_setup_irqs(dev, nr_io_queues);
 		if (hx)
-			dev_warn(dev->dev,
+			dev_dbg(dev->dev,
 				 "HX NVMe setup_io_queues: setup_irqs returned %d\n",
 				 result);
 		if (result <= 0) {
@@ -3367,7 +3367,7 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 	result = max(result - 1, 1);
 	dev->max_qid = result + dev->io_queues[HCTX_TYPE_POLL];
 	if (hx)
-		dev_warn(dev->dev,
+		dev_dbg(dev->dev,
 			 "HX NVMe setup_io_queues: num_vecs=%d max_qid=%u ioq_default=%u read=%u poll=%u\n",
 			 dev->num_vecs, dev->max_qid,
 			 dev->io_queues[HCTX_TYPE_DEFAULT],
@@ -3381,17 +3381,17 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 	 * number of interrupts.
 	 */
 	if (hx)
-		dev_warn(dev->dev,
+		dev_dbg(dev->dev,
 			 "HX NVMe setup_io_queues: before admin queue_request_irq\n");
 	if (hx_reuse_single_vector) {
 		result = 0;
 		if (hx)
-			dev_warn(dev->dev,
+			dev_dbg(dev->dev,
 				 "HX NVMe setup_io_queues: admin irq already registered, skipping duplicate request\n");
 	} else {
 		result = queue_request_irq(adminq);
 		if (hx)
-			dev_warn(dev->dev,
+			dev_dbg(dev->dev,
 				 "HX NVMe setup_io_queues: admin queue_request_irq result=%d\n",
 				 result);
 		if (result)
@@ -3401,12 +3401,12 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 	mutex_unlock(&dev->shutdown_lock);
 
 	if (hx)
-		dev_warn(dev->dev,
+		dev_dbg(dev->dev,
 			 "HX NVMe setup_io_queues: before create_io_queues max_qid=%u online=%u\n",
 			 dev->max_qid, dev->online_queues);
 	result = nvme_create_io_queues(dev);
 	if (hx)
-		dev_warn(dev->dev,
+		dev_dbg(dev->dev,
 			 "HX NVMe setup_io_queues: create_io_queues result=%d online=%u max_qid=%u\n",
 			 result, dev->online_queues, dev->max_qid);
 	if (result || dev->online_queues < 2)
@@ -3590,11 +3590,11 @@ static int nvme_pci_enable(struct nvme_dev *dev)
 	if (dev->ctrl.quirks & NVME_QUIRK_BROKEN_MSI)
 		flags &= ~PCI_IRQ_MSI;
 	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME)
-		dev_warn(&pdev->dev, "HX NVMe requesting setup IRQ vector: flags=0x%x msi_cap=0x%x msix_cap=0x%x irq=%d\n",
+		dev_dbg(&pdev->dev, "HX NVMe requesting setup IRQ vector: flags=0x%x msi_cap=0x%x msix_cap=0x%x irq=%d\n",
 			 flags, pdev->msi_cap, pdev->msix_cap, pdev->irq);
 	result = pci_alloc_irq_vectors(pdev, 1, 1, flags);
 	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME)
-		dev_warn(&pdev->dev, "HX NVMe setup IRQ vector result=%d\n", result);
+		dev_dbg(&pdev->dev, "HX NVMe setup IRQ vector result=%d\n", result);
 	if (result < 0)
 		goto disable;
 
@@ -3649,18 +3649,18 @@ static int nvme_pci_enable(struct nvme_dev *dev)
 	dev->ctrl.sqsize = dev->q_depth - 1; /* 0's based queue depth */
 
 	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME) {
-		dev_warn(&pdev->dev, "HX NVMe calling preinit\n");
+		dev_dbg(&pdev->dev, "HX NVMe calling preinit\n");
 		result = nvme_hx_preinit(&dev->ctrl, dev->dev);
-		dev_warn(&pdev->dev, "HX NVMe preinit result=%d\n", result);
+		dev_dbg(&pdev->dev, "HX NVMe preinit result=%d\n", result);
 		if (result)
 			goto free_irq;
 	}
 
 	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME)
-		dev_warn(&pdev->dev, "HX NVMe before nvme_map_cmb\n");
+		dev_dbg(&pdev->dev, "HX NVMe before nvme_map_cmb\n");
 	nvme_map_cmb(dev);
 	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME) {
-		dev_warn(&pdev->dev, "HX NVMe after nvme_map_cmb\n");
+		dev_dbg(&pdev->dev, "HX NVMe after nvme_map_cmb\n");
 		if (nvme_hx_dt_bool("hx,stop-after-nvme-map-cmb")) {
 			dev_warn(&pdev->dev, "HX NVMe probe stopped after nvme_map_cmb by device tree.\n");
 			result = -ECANCELED;
@@ -3669,10 +3669,10 @@ static int nvme_pci_enable(struct nvme_dev *dev)
 	}
 
 	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME)
-		dev_warn(&pdev->dev, "HX NVMe before pci_save_state\n");
+		dev_dbg(&pdev->dev, "HX NVMe before pci_save_state\n");
 	pci_save_state(pdev);
 	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME) {
-		dev_warn(&pdev->dev, "HX NVMe after pci_save_state\n");
+		dev_dbg(&pdev->dev, "HX NVMe after pci_save_state\n");
 		if (nvme_hx_dt_bool("hx,stop-after-nvme-pci-save-state")) {
 			dev_warn(&pdev->dev, "HX NVMe probe stopped after pci_save_state by device tree.\n");
 			result = -ECANCELED;
@@ -3681,10 +3681,10 @@ static int nvme_pci_enable(struct nvme_dev *dev)
 	}
 
 	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME)
-		dev_warn(&pdev->dev, "HX NVMe before configure_admin_queue\n");
+		dev_dbg(&pdev->dev, "HX NVMe before configure_admin_queue\n");
 	result = nvme_pci_configure_admin_queue(dev);
 	if (dev->ctrl.quirks & NVME_QUIRK_HX_NVME)
-		dev_warn(&pdev->dev, "HX NVMe configure_admin_queue result=%d\n", result);
+		dev_dbg(&pdev->dev, "HX NVMe configure_admin_queue result=%d\n", result);
 	if (result)
 		goto free_irq;
 	return result;

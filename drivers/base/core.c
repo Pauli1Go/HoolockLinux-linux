@@ -3543,26 +3543,6 @@ static int device_private_init(struct device *dev)
 	return 0;
 }
 
-static bool device_hx_stop_after_add_stage(struct device *dev, const char *stage)
-{
-	struct device *parent;
-	char propname[80];
-
-	if (!dev->bus || strcmp(dev->bus->name, "pci"))
-		return false;
-
-	snprintf(propname, sizeof(propname), "hx,stop-after-device-add-%s", stage);
-
-	for (parent = dev; parent; parent = parent->parent) {
-		if (parent->of_node && of_property_read_bool(parent->of_node, propname)) {
-			dev_warn(dev, "HX device_add stopped after %s by device tree\n", stage);
-			return true;
-		}
-	}
-
-	return false;
-}
-
 static void device_hx_trace_add_stage(struct device *dev, const char *stage)
 {
 	struct device *parent;
@@ -3666,40 +3646,26 @@ int device_add(struct device *dev)
 		glue_dir = kobj;
 		goto Error;
 	}
-	if (device_hx_stop_after_add_stage(dev, "kobject-add"))
-		goto done;
 
 	/* notify platform of device entry */
 	device_platform_notify(dev);
-	if (device_hx_stop_after_add_stage(dev, "platform-notify"))
-		goto done;
 
 	error = device_create_file(dev, &dev_attr_uevent);
 	if (error)
 		goto attrError;
-	if (device_hx_stop_after_add_stage(dev, "uevent-file"))
-		goto done;
 
 	error = device_add_class_symlinks(dev);
 	if (error)
 		goto SymlinkError;
-	if (device_hx_stop_after_add_stage(dev, "class-symlinks"))
-		goto done;
 	error = device_add_attrs(dev);
 	if (error)
 		goto AttrsError;
-	if (device_hx_stop_after_add_stage(dev, "attrs"))
-		goto done;
 	error = bus_add_device(dev);
 	if (error)
 		goto BusError;
-	if (device_hx_stop_after_add_stage(dev, "bus-add"))
-		goto done;
 	error = dpm_sysfs_add(dev);
 	if (error)
 		goto DPMError;
-	if (device_hx_stop_after_add_stage(dev, "dpm-sysfs"))
-		goto done;
 	device_hx_trace_add_stage(dev, "before device_pm_add");
 	device_pm_add(dev);
 	device_hx_trace_add_stage(dev, "after device_pm_add");
