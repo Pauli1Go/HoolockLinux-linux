@@ -315,6 +315,17 @@ config APPLE_DART
 
 	  Say Y here if you are using an Apple SoC.
 
+config APPLE_T8010_DART
+	tristate "Apple T8010 legacy DART IOMMU support"
+	depends on ARCH_APPLE || COMPILE_TEST
+	select IOMMU_API
+	help
+	  Support for the older DART layout used by Apple A10/T8010 PCIe.
+	  This covers the pre-M1 register layout where TTBRs start at 0x40
+	  and the PCIe aperture is offset into the device IOVA space.
+	  Enable this when bringing up H9P/Apple NVMe storage on T8010
+	  devices that cannot use the newer apple-dart register layout.
+
 config S390_IOMMU
 	def_bool y if S390 && PCI
 	depends on S390 && PCI
