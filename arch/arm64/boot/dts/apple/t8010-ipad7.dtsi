@@ -27,13 +27,13 @@
 
 	soc {
 		pcie0_dart0: iommu@601008000 {
-			compatible = "apple,t8010-dart";
+			compatible = "apple,t8010-dart", "apple,s5l8960x-dart";
 			reg = <0x6 0x01008000 0x0 0x4000>;
 			#iommu-cells = <1>;
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 271 IRQ_TYPE_LEVEL_HIGH>;
 			power-domains = <&ps_pcie>;
-			pcie-dart;
+			apple,dma-range = <0x0 0x80000000 0x0 0x3c000000>;
 		};
 
 		pcie0: pcie@610000000 {
