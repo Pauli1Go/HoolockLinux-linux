@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Apple H9P/T8010 PCI NVMe glue.
- *
- * This file is included by pci.c because the FlatDMA path needs access to
- * nvme-pci's private request, queue and controller structs.
  */
 
-#define PCI_DEVICE_ID_APPLE_H9P_NVME	0x2002
+#include <linux/apple-h9p-pcie.h>
+#include <linux/dma-mapping.h>
+#include <linux/gfp.h>
+#include <linux/iopoll.h>
+#include <linux/mempool.h>
+#include <linux/of.h>
+#include <linux/of_address.h>
+#include <linux/pci.h>
+
+#include "pci-internal.h"
+
 #define NVME_CMD_APPLE_H9P_FLATDMA	BIT(5)
 
 #define APPLE_H9P_REG_INIT		0x1800
@@ -38,17 +45,35 @@ struct apple_h9p_nvme {
 	spinlock_t req_lock;
 };
 
-static bool nvme_pci_is_apple_h9p(struct pci_dev *pdev)
+static struct apple_h9p_nvme *nvme_pci_apple_h9p(struct nvme_dev *dev)
 {
-	return pdev->vendor == PCI_VENDOR_ID_APPLE &&
-	       pdev->device == PCI_DEVICE_ID_APPLE_H9P_NVME;
+	return dev->dma_data;
+}
+
+static int nvme_pci_apple_h9p_init(struct nvme_dev *dev, int node)
+{
+	struct apple_h9p_nvme *h9p;
+
+	h9p = kzalloc_node(sizeof(*h9p), GFP_KERNEL, node);
+	if (!h9p)
+		return -ENOMEM;
+
+	spin_lock_init(&h9p->req_lock);
+	dev->dma_data = h9p;
+	return 0;
+}
+
+static void nvme_pci_apple_h9p_exit(struct nvme_dev *dev)
+{
+	kfree(dev->dma_data);
+	dev->dma_data = NULL;
 }
 
 static int nvme_pci_apple_h9p_find_scratch(struct nvme_dev *dev,
 					   u32 scratch_size_req,
 					   u32 scratch_align_req)
 {
-	struct apple_h9p_nvme *h9p = dev->apple_h9p;
+	struct apple_h9p_nvme *h9p = nvme_pci_apple_h9p(dev);
 	struct pci_dev *pdev = to_pci_dev(dev->dev);
 	struct pci_host_bridge *bridge;
 	struct device_node *pcie_np;
@@ -115,7 +140,7 @@ static int nvme_pci_apple_h9p_preinit(struct nvme_dev *dev)
 	u32 scratch_size, scratch_align;
 	int ret;
 
-	if (!dev->apple_h9p)
+	if (!nvme_pci_apple_h9p(dev))
 		return 0;
 
 	if (pci_write_config_byte(pdev, PCI_LATENCY_TIMER, 0x40) !=
@@ -156,7 +181,7 @@ static int nvme_pci_apple_h9p_preinit(struct nvme_dev *dev)
 
 static int nvme_pci_apple_h9p_prepare_enable(struct nvme_dev *dev)
 {
-	struct apple_h9p_nvme *h9p = dev->apple_h9p;
+	struct apple_h9p_nvme *h9p = nvme_pci_apple_h9p(dev);
 
 	if (!h9p)
 		return 0;
@@ -178,7 +203,7 @@ static blk_status_t nvme_pci_apple_h9p_alloc_req(struct nvme_dev *dev,
 						 struct apple_h9p_nvme_req **req,
 						 unsigned int *tag)
 {
-	struct apple_h9p_nvme *h9p = dev->apple_h9p;
+	struct apple_h9p_nvme *h9p = nvme_pci_apple_h9p(dev);
 	unsigned long flags;
 	unsigned int idx;
 
@@ -210,7 +235,7 @@ static blk_status_t nvme_pci_apple_h9p_alloc_req(struct nvme_dev *dev,
 static void nvme_pci_apple_h9p_free_req(struct nvme_dev *dev,
 					struct apple_h9p_nvme_req *req)
 {
-	struct apple_h9p_nvme *h9p = dev->apple_h9p;
+	struct apple_h9p_nvme *h9p = nvme_pci_apple_h9p(dev);
 	unsigned long flags;
 	unsigned int tag;
 
@@ -236,7 +261,7 @@ static bool nvme_pci_apple_h9p_unmap_data(struct request *req)
 	struct nvme_dev *dev = nvmeq->dev;
 	unsigned int i;
 
-	if (!iod->apple_h9p_req)
+	if (!iod->dma_private)
 		return false;
 
 	for (i = 0; i < iod->nr_dma_vecs; i++)
@@ -248,8 +273,8 @@ static bool nvme_pci_apple_h9p_unmap_data(struct request *req)
 	}
 	iod->nr_dma_vecs = 0;
 
-	nvme_pci_apple_h9p_free_req(dev, iod->apple_h9p_req);
-	iod->apple_h9p_req = NULL;
+	nvme_pci_apple_h9p_free_req(dev, iod->dma_private);
+	iod->dma_private = NULL;
 	iod->cmd.common.flags &= ~NVME_CMD_APPLE_H9P_FLATDMA;
 	return true;
 }
@@ -269,7 +294,7 @@ static blk_status_t nvme_pci_apple_h9p_map_data(struct request *req)
 	blk_status_t status;
 	int ret;
 
-	if (!dev->apple_h9p)
+	if (!nvme_pci_apple_h9p(dev))
 		return BLK_STS_NOTSUPP;
 	if (total > APPLE_H9P_NVMMU_MAX_PAGES * APPLE_H9P_NVMMU_PAGE_SIZE)
 		return BLK_STS_IOERR;
@@ -278,7 +303,7 @@ static blk_status_t nvme_pci_apple_h9p_map_data(struct request *req)
 	if (status)
 		return status;
 
-	iod->apple_h9p_req = hreq;
+	iod->dma_private = hreq;
 	iod->dma_vecs = mempool_alloc(dev->dmavec_mempool, GFP_ATOMIC);
 	if (!iod->dma_vecs) {
 		status = BLK_STS_RESOURCE;
@@ -362,3 +387,36 @@ out_unmap:
 	nvme_pci_apple_h9p_unmap_data(req);
 	return status;
 }
+
+static bool nvme_pci_apple_h9p_reuse_admin_irq(struct nvme_dev *dev,
+					       struct pci_dev *pdev,
+					       struct nvme_queue *adminq)
+{
+	return (dev->ctrl.quirks & NVME_QUIRK_SINGLE_VECTOR) &&
+	       pdev->msi_enabled &&
+	       test_bit(NVMEQ_ENABLED, &adminq->flags);
+}
+
+static u32 nvme_pci_apple_h9p_queue_depth(struct nvme_dev *dev, u32 depth)
+{
+	return min_t(u32, depth, APPLE_H9P_NVMMU_MAX_REQS);
+}
+
+static u32 nvme_pci_apple_h9p_max_hw_sectors(struct nvme_dev *dev,
+					     u32 max_hw_sectors)
+{
+	return min_t(u32, max_hw_sectors, APPLE_H9P_NVME_MAX_SECTORS);
+}
+
+const struct nvme_pci_dma_ops nvme_pci_apple_h9p_ops = {
+	.quirks		= NVME_QUIRK_SINGLE_VECTOR | NVME_QUIRK_SHARED_TAGS,
+	.init		= nvme_pci_apple_h9p_init,
+	.exit		= nvme_pci_apple_h9p_exit,
+	.preinit	= nvme_pci_apple_h9p_preinit,
+	.prepare_enable = nvme_pci_apple_h9p_prepare_enable,
+	.map_data	= nvme_pci_apple_h9p_map_data,
+	.unmap_data	= nvme_pci_apple_h9p_unmap_data,
+	.reuse_admin_irq = nvme_pci_apple_h9p_reuse_admin_irq,
+	.queue_depth	= nvme_pci_apple_h9p_queue_depth,
+	.max_hw_sectors = nvme_pci_apple_h9p_max_hw_sectors,
+};

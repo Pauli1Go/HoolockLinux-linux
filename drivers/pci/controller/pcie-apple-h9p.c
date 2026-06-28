@@ -21,7 +21,6 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
-#include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/msi.h>
 #include <linux/of.h>
@@ -31,7 +30,6 @@
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
-#include <linux/regmap.h>
 #include <linux/sizes.h>
 
 #include <linux/apple-h9p-pcie.h>
@@ -43,16 +41,64 @@
 #define H9P_MSI_PER_PORT		(H9P_NUM_MSI / H9P_NUM_PORTS)
 
 #define H9P_CFG_PORT_STRIDE		0x8000
+#define H9P_CFG_PORT_MISC		0x08e0
 
-#define H9P_PHY0_PORTSTAT(port)		(0x0100 + (port) * 0x0080)
+#define H9P_PHY0_COMMON_CTL0		0x0004
+#define H9P_PHY0_COMMON_CTL1		0x0014
+#define H9P_PHY0_COMMON_CTL2		0x0024
+#define H9P_PHY0_COMMON_CTL3		0x0034
+#define H9P_PHY0_COMMON_CTL_ENABLE	BIT(0)
+#define H9P_PHY0_COMMON_CTL_INIT	BIT(4)
+#define H9P_PHY0_PORT_STRIDE		0x0080
+#define H9P_PHY0_PORTSTAT(port)		(0x0100 + (port) * H9P_PHY0_PORT_STRIDE)
+#define H9P_PHY0_PORT_CTL0(port)	(0x0100 + (port) * H9P_PHY0_PORT_STRIDE)
+#define H9P_PHY0_PORT_CTL1(port)	(0x0124 + (port) * H9P_PHY0_PORT_STRIDE)
+#define H9P_PHY0_PORT_CTL2(port)	(0x0134 + (port) * H9P_PHY0_PORT_STRIDE)
+#define H9P_PHY0_COMMON_STAT		0x0028
+#define H9P_PHY0_COMMON_STAT_INIT_DONE	BIT(4)
+#define H9P_PHY0_COMMON_STAT_READY	BIT(0)
+#define H9P_PHY0_PORT_LINK_RATE(port)	(0x4020 + (port) * 0x0040)
 #define H9P_PHY1_PORTMASK		0x000c
 
+#define H9P_PHY2_EQ_COMMON0		0x0180
+#define H9P_PHY2_EQ_COMMON1		0x0184
+#define H9P_PHY2_EQ_TIME0		0x0090
+#define H9P_PHY2_EQ_TIME1		0x0098
+#define H9P_PHY2_PORT_STRIDE		0x0800
+#define H9P_PHY2_PORT(port, reg)	((reg) + (port) * H9P_PHY2_PORT_STRIDE)
+#define H9P_PHY2_PORT_EQ_CTL		0x10088
+#define H9P_PHY2_PORT_IDLE		0x10784
+#define H9P_PHY2_PORT_EQ_PRESET	0x10004
+#define H9P_PHY2_PORT_RX_CTL0		0x20788
+#define H9P_PHY2_PORT_RX_CTL1		0x207a0
+#define H9P_PHY2_PORT_RX_CTL2		0x207a8
+#define H9P_PHY2_PORT_RX_CTL3		0x20400
+#define H9P_PHY2_PORT_TIMER0		0x2009c
+#define H9P_PHY2_PORT_TIMER1		0x200dc
+#define H9P_PHY2_PORT_TIMER2		0x200a0
+#define H9P_PHY2_PORT_TIMER3		0x200e0
+#define H9P_PHY2_PORT_TIMER4		0x200a4
+#define H9P_PHY2_PORT_TIMER5		0x200e4
+#define H9P_PHY2_PORT_CLEAR0		0x20330
+#define H9P_PHY2_PORT_CLEAR1		0x20340
+#define H9P_PHY2_PORT_CLEAR2		0x20350
+
 #define H9P_PORT_LTSSMCTL		0x0080
+#define H9P_PORT_LTSSM_ENABLE		BIT(0)
 #define H9P_PORT_IRQSTAT		0x0100
 #define H9P_PORT_IRQMASK		0x0104
+#define H9P_PORT_IRQMASK_PRE_LINK	0xff002fff
+#define H9P_PORT_IRQSTAT_PRE_LINK	0x00ffd000
+#define H9P_PORT_IRQMASK_LINK_UP	0xff002f0f
+#define H9P_PORT_PWRCTL		0x0124
+#define H9P_PORT_PWRCTL_INIT		0x31
 #define H9P_PORT_MSIVECBASE		0x0128
 #define H9P_PORT_ENABLE		0x0140
+#define H9P_PORT_ENABLE_APPLE		BIT(31)
 #define H9P_PORT_LINKSTS		0x0208
+#define H9P_PORT_LINKSTS_LTSSM		GENMASK(13, 8)
+#define H9P_PORT_LTSSM_DETECT		0x11
+#define H9P_PORT_LTSSM_L0		0x14
 
 #define H9P_LINK_SPEED_2_5GT		1
 #define H9P_LINK_SPEED_8GT		3
@@ -61,6 +107,10 @@
 #define H9P_PCIECLK_POSTUP1		0x000c
 #define H9P_PCIECLK_POSTUP2		0x4104
 #define H9P_PCIECLK_POSTUP3		0x4100
+#define H9P_PCIECLK_POSTUP0_VALUE	0x00000007
+#define H9P_PCIECLK_POSTUP1_VALUE	0x80010005
+#define H9P_PCIECLK_POSTUP2_VALUE	0x00000003
+#define H9P_PCIECLK_POSTUP3_VALUE	0x00000003
 
 #define H9P_NVMMU_TCB_CTRL		0x0004
 #define H9P_NVMMU_TCB_BASE_LO		0x0008
@@ -82,16 +132,6 @@
 #define H9P_NVMMU_TCB_WRITE		0x200
 
 #define H9P_DEFAULT_MSI_DOORBELL	0xbffff000ULL
-
-#define APPLE_PMGR_AUTO_ENABLE		BIT(28)
-#define APPLE_PMGR_WAS_CLKGATED	BIT(9)
-#define APPLE_PMGR_WAS_PWRGATED	BIT(8)
-#define APPLE_PMGR_PS_ACTUAL		GENMASK(7, 4)
-#define APPLE_PMGR_PS_TARGET		GENMASK(3, 0)
-#define APPLE_PMGR_FLAGS		(APPLE_PMGR_WAS_CLKGATED | \
-					 APPLE_PMGR_WAS_PWRGATED)
-#define APPLE_PMGR_PS_ACTIVE		0xf
-#define APPLE_PMGR_PS_SET_TIMEOUT_US	10000
 
 struct apple_h9p_tunable {
 	u32 offset;
@@ -329,95 +369,6 @@ static struct apple_h9p_pcie *apple_h9p_pcie_lookup(struct device *dev)
 	struct pci_host_bridge *bridge = dev_get_drvdata(dev);
 
 	return bridge ? pci_host_bridge_priv(bridge) : NULL;
-}
-
-static int apple_h9p_pcie_force_power_domain(struct apple_h9p_pcie *pcie,
-					     struct device_node *pd_np)
-{
-	struct device *dev = pcie->dev;
-	struct device_node *pmgr_np;
-	struct regmap *regmap;
-	u32 offset;
-	u32 val;
-	int ret;
-
-	ret = of_property_read_u32_index(pd_np, "reg", 0, &offset);
-	if (ret)
-		return dev_err_probe(dev, ret, "%pOF missing PMGR reg\n",
-				     pd_np);
-
-	pmgr_np = of_get_parent(pd_np);
-	if (!pmgr_np)
-		return dev_err_probe(dev, -EINVAL,
-				     "%pOF has no PMGR parent\n", pd_np);
-
-	regmap = syscon_node_to_regmap(pmgr_np);
-	of_node_put(pmgr_np);
-	if (IS_ERR(regmap))
-		return dev_err_probe(dev, PTR_ERR(regmap),
-				     "%pOF missing PMGR regmap\n", pd_np);
-
-	ret = regmap_read(regmap, offset, &val);
-	if (ret)
-		return dev_err_probe(dev, ret,
-				     "%pOF PMGR read failed\n", pd_np);
-
-	val &= ~(APPLE_PMGR_AUTO_ENABLE | APPLE_PMGR_FLAGS |
-		 APPLE_PMGR_PS_TARGET);
-	val |= FIELD_PREP(APPLE_PMGR_PS_TARGET, APPLE_PMGR_PS_ACTIVE);
-
-	ret = regmap_write(regmap, offset, val);
-	if (ret)
-		return dev_err_probe(dev, ret,
-				     "%pOF PMGR write failed\n", pd_np);
-
-	ret = regmap_read_poll_timeout_atomic(regmap, offset, val,
-					      FIELD_GET(APPLE_PMGR_PS_ACTUAL,
-							val) ==
-					      APPLE_PMGR_PS_ACTIVE, 1,
-					      APPLE_PMGR_PS_SET_TIMEOUT_US);
-	if (ret)
-		return dev_err_probe(dev, ret,
-				     "%pOF PMGR active timeout\n", pd_np);
-
-	val &= ~APPLE_PMGR_FLAGS;
-	val |= APPLE_PMGR_AUTO_ENABLE;
-
-	ret = regmap_write(regmap, offset, val);
-	if (ret)
-		return dev_err_probe(dev, ret,
-				     "%pOF PMGR auto-enable failed\n",
-				     pd_np);
-
-	return 0;
-}
-
-static int apple_h9p_pcie_force_power_domains(struct apple_h9p_pcie *pcie)
-{
-	struct device *dev = pcie->dev;
-	struct device_node *pd_np;
-	int count;
-	int i;
-	int ret;
-
-	count = of_count_phandle_with_args(dev->of_node, "power-domains",
-					   "#power-domain-cells");
-	if (count <= 0)
-		return 0;
-
-	for (i = 0; i < count; i++) {
-		pd_np = of_parse_phandle(dev->of_node, "power-domains", i);
-		if (!pd_np)
-			return dev_err_probe(dev, -EINVAL,
-					     "missing power-domain %d\n", i);
-
-		ret = apple_h9p_pcie_force_power_domain(pcie, pd_np);
-		of_node_put(pd_np);
-		if (ret)
-			return ret;
-	}
-
-	return 0;
 }
 
 static int apple_h9p_pcie_config_read(struct pci_bus *bus, unsigned int devfn,
@@ -1000,10 +951,14 @@ static int apple_h9p_pcieclk_postup(struct apple_h9p_pcie *pcie)
 	if (!pcie->base_pcieclk_postup)
 		return 0;
 
-	writel(0x00000007, pcie->base_pcieclk_postup + H9P_PCIECLK_POSTUP0);
-	writel(0x80010005, pcie->base_pcieclk_postup + H9P_PCIECLK_POSTUP1);
-	writel(0x00000003, pcie->base_pcieclk_postup + H9P_PCIECLK_POSTUP2);
-	writel(0x00000003, pcie->base_pcieclk_postup + H9P_PCIECLK_POSTUP3);
+	writel(H9P_PCIECLK_POSTUP0_VALUE,
+	       pcie->base_pcieclk_postup + H9P_PCIECLK_POSTUP0);
+	writel(H9P_PCIECLK_POSTUP1_VALUE,
+	       pcie->base_pcieclk_postup + H9P_PCIECLK_POSTUP1);
+	writel(H9P_PCIECLK_POSTUP2_VALUE,
+	       pcie->base_pcieclk_postup + H9P_PCIECLK_POSTUP2);
+	writel(H9P_PCIECLK_POSTUP3_VALUE,
+	       pcie->base_pcieclk_postup + H9P_PCIECLK_POSTUP3);
 
 	return 0;
 }
@@ -1012,8 +967,8 @@ static bool apple_h9p_link_up(struct apple_h9p_pcie *pcie, unsigned int port)
 {
 	u32 linksts = readl(pcie->base_port[port] + H9P_PORT_LINKSTS);
 
-	linksts = (linksts >> 8) & 0x3f;
-	return linksts >= 0x11 && linksts <= 0x14;
+	linksts = FIELD_GET(H9P_PORT_LINKSTS_LTSSM, linksts);
+	return linksts >= H9P_PORT_LTSSM_DETECT && linksts <= H9P_PORT_LTSSM_L0;
 }
 
 static int apple_h9p_setup_port(struct apple_h9p_pcie *pcie, unsigned int port)
@@ -1027,23 +982,25 @@ static int apple_h9p_setup_port(struct apple_h9p_pcie *pcie, unsigned int port)
 
 	gpiod_direction_output(pcie->perst[port], 0);
 
-	h9p_rmw(pcie->base_phy[0] + 0x134 + 0x80 * port, 1, 0);
-	h9p_rmw(pcie->base_phy[0] + 0x124 + 0x80 * port, 0, 1);
+	h9p_rmw(pcie->base_phy[0] + H9P_PHY0_PORT_CTL2(port), 1, 0);
+	h9p_rmw(pcie->base_phy[0] + H9P_PHY0_PORT_CTL1(port), 0, 1);
 
-	ret = apple_h9p_wait(pcie->base_phy[0] + 0x28, 0x10, 0x10, 0x10,
-			     250000);
+	ret = apple_h9p_wait(pcie->base_phy[0] + H9P_PHY0_COMMON_STAT,
+			     H9P_PHY0_COMMON_STAT_INIT_DONE,
+			     H9P_PHY0_COMMON_STAT_INIT_DONE,
+			     H9P_PHY0_COMMON_STAT_INIT_DONE, 250000);
 	if (ret)
 		return dev_err_probe(dev, ret, "port %u init timeout\n", port);
 
 	usleep_range(250, 1000);
-	h9p_rmw(pcie->base_phy[0] + 0x100 + 0x80 * port, 0, 1);
-	h9p_rmw(pcie->base_phy[0] + 0x100 + 0x80 * port, 0x100, 0);
+	h9p_rmw(pcie->base_phy[0] + H9P_PHY0_PORT_CTL0(port), 0, 1);
+	h9p_rmw(pcie->base_phy[0] + H9P_PHY0_PORT_CTL0(port), 0x100, 0);
 	usleep_range(500, 1000);
-	h9p_rmw(pcie->base_phy[0] + 0x134 + 0x80 * port, 0, 1);
+	h9p_rmw(pcie->base_phy[0] + H9P_PHY0_PORT_CTL2(port), 0, 1);
 
 	writel(port ? 0 : H9P_LINK_SPEED_8GT,
-	       pcie->base_phy[0] + 0x4020 + 0x40 * port);
-	h9p_rmw(pcie->base_phy[0] + 0x124 + 0x80 * port, 0x100, 0);
+	       pcie->base_phy[0] + H9P_PHY0_PORT_LINK_RATE(port));
+	h9p_rmw(pcie->base_phy[0] + H9P_PHY0_PORT_CTL1(port), 0x100, 0);
 
 	cap = apple_h9p_read_pci_cap(pcie, port << 3, PCI_CAP_ID_EXP);
 	if (cap)
@@ -1057,14 +1014,17 @@ static int apple_h9p_setup_port(struct apple_h9p_pcie *pcie, unsigned int port)
 	apple_h9p_apply_tunables(pcie->base_port[port], h9p_port_tunables,
 				 ARRAY_SIZE(h9p_port_tunables));
 
-	h9p_rmw(pcie->base_config + port * H9P_CFG_PORT_STRIDE + 0x8e0,
-		0, 1);
+	h9p_rmw(pcie->base_config + port * H9P_CFG_PORT_STRIDE +
+		H9P_CFG_PORT_MISC, 0, 1);
 
-	writel(0xff002fff, pcie->base_port[port] + H9P_PORT_IRQMASK);
-	writel(0x00ffd000, pcie->base_port[port] + H9P_PORT_IRQSTAT);
+	writel(H9P_PORT_IRQMASK_PRE_LINK,
+	       pcie->base_port[port] + H9P_PORT_IRQMASK);
+	writel(H9P_PORT_IRQSTAT_PRE_LINK,
+	       pcie->base_port[port] + H9P_PORT_IRQSTAT);
 
-	h9p_rmw(pcie->base_port[port] + H9P_PORT_ENABLE, 0, 0x80000000);
-	writel(0x31, pcie->base_port[port] + 0x124);
+	h9p_rmw(pcie->base_port[port] + H9P_PORT_ENABLE, 0,
+		H9P_PORT_ENABLE_APPLE);
+	writel(H9P_PORT_PWRCTL_INIT, pcie->base_port[port] + H9P_PORT_PWRCTL);
 	writel(port * 0x10001 * H9P_MSI_PER_PORT,
 	       pcie->base_port[port] + H9P_PORT_MSIVECBASE);
 
@@ -1083,33 +1043,46 @@ static int apple_h9p_setup_port(struct apple_h9p_pcie *pcie, unsigned int port)
 		return dev_err_probe(dev, ret, "port %u PHY up timeout\n",
 				     port);
 
-	h9p_rmw(pcie->base_phy[2] + 0x180, 0, 0x4000);
-	h9p_rmw(pcie->base_phy[2] + 0x184, 0, 0x4000);
-	h9p_rmw(pcie->base_phy[2] + 0x90, 0xfff, 100);
-	h9p_rmw(pcie->base_phy[2] + 0x98, 0xfff, 25);
-	h9p_rmw(pcie->base_phy[2] + 0x10088 + 0x800 * port, 0, 0x4000);
-	writel(0, pcie->base_phy[2] + 0x10784 + 0x800 * port);
-	h9p_rmw(pcie->base_phy[2] + 0x10004 + 0x800 * port, 0xfff, 0x600);
-	writel(0x3105, pcie->base_phy[2] + 0x20788 + 0x800 * port);
-	h9p_rmw(pcie->base_phy[2] + 0x207a0 + 0x800 * port, 0xff, 0x9f);
-	h9p_rmw(pcie->base_phy[2] + 0x207a8 + 0x800 * port, 0xff, 0x01);
-	h9p_rmw(pcie->base_phy[2] + 0x20400 + 0x800 * port, 0x1f, 0x0a);
-	writel(175, pcie->base_phy[2] + 0x2009c + 0x800 * port);
-	writel(175, pcie->base_phy[2] + 0x200dc + 0x800 * port);
-	writel(333, pcie->base_phy[2] + 0x200a0 + 0x800 * port);
-	writel(333, pcie->base_phy[2] + 0x200e0 + 0x800 * port);
-	writel(530, pcie->base_phy[2] + 0x200a4 + 0x800 * port);
-	writel(530, pcie->base_phy[2] + 0x200e4 + 0x800 * port);
-	writel(0, pcie->base_phy[2] + 0x20330 + 0x800 * port);
-	writel(0, pcie->base_phy[2] + 0x20340 + 0x800 * port);
-	writel(0, pcie->base_phy[2] + 0x20350 + 0x800 * port);
+	h9p_rmw(pcie->base_phy[2] + H9P_PHY2_EQ_COMMON0, 0, 0x4000);
+	h9p_rmw(pcie->base_phy[2] + H9P_PHY2_EQ_COMMON1, 0, 0x4000);
+	h9p_rmw(pcie->base_phy[2] + H9P_PHY2_EQ_TIME0, 0xfff, 100);
+	h9p_rmw(pcie->base_phy[2] + H9P_PHY2_EQ_TIME1, 0xfff, 25);
+	h9p_rmw(pcie->base_phy[2] + H9P_PHY2_PORT(port, H9P_PHY2_PORT_EQ_CTL),
+		0, 0x4000);
+	writel(0, pcie->base_phy[2] + H9P_PHY2_PORT(port, H9P_PHY2_PORT_IDLE));
+	h9p_rmw(pcie->base_phy[2] +
+		H9P_PHY2_PORT(port, H9P_PHY2_PORT_EQ_PRESET), 0xfff, 0x600);
+	writel(0x3105, pcie->base_phy[2] +
+	       H9P_PHY2_PORT(port, H9P_PHY2_PORT_RX_CTL0));
+	h9p_rmw(pcie->base_phy[2] +
+		H9P_PHY2_PORT(port, H9P_PHY2_PORT_RX_CTL1), 0xff, 0x9f);
+	h9p_rmw(pcie->base_phy[2] +
+		H9P_PHY2_PORT(port, H9P_PHY2_PORT_RX_CTL2), 0xff, 0x01);
+	h9p_rmw(pcie->base_phy[2] +
+		H9P_PHY2_PORT(port, H9P_PHY2_PORT_RX_CTL3), 0x1f, 0x0a);
+	writel(175, pcie->base_phy[2] + H9P_PHY2_PORT(port, H9P_PHY2_PORT_TIMER0));
+	writel(175, pcie->base_phy[2] + H9P_PHY2_PORT(port, H9P_PHY2_PORT_TIMER1));
+	writel(333, pcie->base_phy[2] + H9P_PHY2_PORT(port, H9P_PHY2_PORT_TIMER2));
+	writel(333, pcie->base_phy[2] + H9P_PHY2_PORT(port, H9P_PHY2_PORT_TIMER3));
+	writel(530, pcie->base_phy[2] + H9P_PHY2_PORT(port, H9P_PHY2_PORT_TIMER4));
+	writel(530, pcie->base_phy[2] + H9P_PHY2_PORT(port, H9P_PHY2_PORT_TIMER5));
+	writel(0, pcie->base_phy[2] + H9P_PHY2_PORT(port, H9P_PHY2_PORT_CLEAR0));
+	writel(0, pcie->base_phy[2] + H9P_PHY2_PORT(port, H9P_PHY2_PORT_CLEAR1));
+	writel(0, pcie->base_phy[2] + H9P_PHY2_PORT(port, H9P_PHY2_PORT_CLEAR2));
 
-	writel(0xff002f0f, pcie->base_port[port] + H9P_PORT_IRQMASK);
+	writel(H9P_PORT_IRQMASK_LINK_UP,
+	       pcie->base_port[port] + H9P_PORT_IRQMASK);
 	usleep_range(5000, 10000);
 
-	h9p_rmw(pcie->base_port[port] + H9P_PORT_LTSSMCTL, 0, 1);
+	h9p_rmw(pcie->base_port[port] + H9P_PORT_LTSSMCTL, 0,
+		H9P_PORT_LTSSM_ENABLE);
 	ret = apple_h9p_wait(pcie->base_port[port] + H9P_PORT_LINKSTS,
-			     0x3f00, 0x1100, 0x1400, 500000);
+			     H9P_PORT_LINKSTS_LTSSM,
+			     FIELD_PREP(H9P_PORT_LINKSTS_LTSSM,
+					H9P_PORT_LTSSM_DETECT),
+			     FIELD_PREP(H9P_PORT_LINKSTS_LTSSM,
+					H9P_PORT_LTSSM_L0),
+			     500000);
 	if (ret)
 		dev_warn(dev, "port %u link did not reach L0\n", port);
 
@@ -1121,26 +1094,36 @@ static int apple_h9p_setup_ports(struct apple_h9p_pcie *pcie)
 	unsigned int port;
 	int ret;
 
-	writel(0x10, pcie->base_phy[0] + 0x0004);
-	h9p_rmw(pcie->base_phy[0] + 0x124, 0, 1);
+	writel(H9P_PHY0_COMMON_CTL_INIT,
+	       pcie->base_phy[0] + H9P_PHY0_COMMON_CTL0);
+	h9p_rmw(pcie->base_phy[0] + H9P_PHY0_PORT_CTL1(0), 0,
+		H9P_PHY0_COMMON_CTL_ENABLE);
 
-	ret = apple_h9p_wait(pcie->base_phy[0] + 0x28, 0x10, 0x10, 0x10,
-			     250000);
+	ret = apple_h9p_wait(pcie->base_phy[0] + H9P_PHY0_COMMON_STAT,
+			     H9P_PHY0_COMMON_STAT_INIT_DONE,
+			     H9P_PHY0_COMMON_STAT_INIT_DONE,
+			     H9P_PHY0_COMMON_STAT_INIT_DONE, 250000);
 	if (ret)
 		return dev_err_probe(pcie->dev, ret,
 				     "global PHY init timeout\n");
 
-	ret = apple_h9p_wait(pcie->base_phy[0] + 0x28, 1, 1, 1, 250000);
+	ret = apple_h9p_wait(pcie->base_phy[0] + H9P_PHY0_COMMON_STAT,
+			     H9P_PHY0_COMMON_STAT_READY,
+			     H9P_PHY0_COMMON_STAT_READY,
+			     H9P_PHY0_COMMON_STAT_READY, 250000);
 	if (ret)
 		return dev_err_probe(pcie->dev, ret,
 				     "global PHY ready timeout\n");
 
-	writel(1, pcie->base_phy[0] + 0x34);
+	writel(H9P_PHY0_COMMON_CTL_ENABLE,
+	       pcie->base_phy[0] + H9P_PHY0_COMMON_CTL3);
 	apple_h9p_apply_tunables(pcie->base_phy[0], h9p_phy0_tunables,
 				 ARRAY_SIZE(h9p_phy0_tunables));
-	writel(1, pcie->base_phy[0] + 0x14);
+	writel(H9P_PHY0_COMMON_CTL_ENABLE,
+	       pcie->base_phy[0] + H9P_PHY0_COMMON_CTL1);
 	usleep_range(5000, 10000);
-	writel(1, pcie->base_phy[0] + 0x24);
+	writel(H9P_PHY0_COMMON_CTL_ENABLE,
+	       pcie->base_phy[0] + H9P_PHY0_COMMON_CTL2);
 	usleep_range(500, 1000);
 
 	for (port = 0; port < H9P_NUM_PORTS; port++) {
@@ -1314,10 +1297,6 @@ static int apple_h9p_pcie_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to enable clocks\n");
 	ret = devm_add_action_or_reset(dev, apple_h9p_pcie_clk_cleanup, pcie);
-	if (ret)
-		return ret;
-
-	ret = apple_h9p_pcie_force_power_domains(pcie);
 	if (ret)
 		return ret;
 

@@ -5,7 +5,6 @@
  */
 
 #include <linux/acpi.h>
-#include <linux/apple-h9p-pcie.h>
 #include <linux/async.h>
 #include <linux/bitmap.h>
 #include <linux/blkdev.h>
@@ -35,9 +34,7 @@
 
 #include "trace.h"
 #include "nvme.h"
-
-#define SQ_SIZE(q)	((q)->q_depth << (q)->sqes)
-#define CQ_SIZE(q)	((q)->q_depth * sizeof(struct nvme_completion))
+#include "pci-internal.h"
 
 /* Optimisation for I/Os between 4k and 128k */
 #define NVME_SMALL_POOL_SIZE	256
@@ -46,7 +43,6 @@
  * Arbitrary upper bound.
  */
 #define NVME_MAX_BYTES		SZ_8M
-#define NVME_MAX_NR_DESCRIPTORS	5
 
 /*
  * For data SGLs we support a single descriptors worth of SGL entries.
@@ -281,68 +277,9 @@ static bool noacpi;
 module_param(noacpi, bool, 0444);
 MODULE_PARM_DESC(noacpi, "disable acpi bios quirks");
 
-struct nvme_dev;
-struct nvme_queue;
-struct apple_h9p_nvme;
-
 static void nvme_dev_disable(struct nvme_dev *dev, bool shutdown);
 static void nvme_delete_io_queues(struct nvme_dev *dev);
 static void nvme_update_attrs(struct nvme_dev *dev);
-
-struct nvme_descriptor_pools {
-	struct dma_pool *large;
-	struct dma_pool *small;
-};
-
-/*
- * Represents an NVM Express device.  Each nvme_dev is a PCI function.
- */
-struct nvme_dev {
-	struct nvme_queue *queues;
-	struct blk_mq_tag_set tagset;
-	struct blk_mq_tag_set admin_tagset;
-	u32 __iomem *dbs;
-	struct device *dev;
-	unsigned online_queues;
-	unsigned max_qid;
-	unsigned io_queues[HCTX_MAX_TYPES];
-	unsigned int num_vecs;
-	u32 q_depth;
-	int io_sqes;
-	u32 db_stride;
-	void __iomem *bar;
-	unsigned long bar_mapped_size;
-	struct mutex shutdown_lock;
-	bool subsystem;
-	u64 cmb_size;
-	bool cmb_use_sqes;
-	u32 cmbsz;
-	u32 cmbloc;
-	struct nvme_ctrl ctrl;
-	u32 last_ps;
-	bool hmb;
-	struct sg_table *hmb_sgt;
-	mempool_t *dmavec_mempool;
-	struct apple_h9p_nvme *apple_h9p;
-
-	/* shadow doorbell buffer support: */
-	__le32 *dbbuf_dbs;
-	dma_addr_t dbbuf_dbs_dma_addr;
-	__le32 *dbbuf_eis;
-	dma_addr_t dbbuf_eis_dma_addr;
-
-	/* host memory buffer support: */
-	u64 host_mem_size;
-	u32 nr_host_mem_descs;
-	u32 host_mem_descs_size;
-	dma_addr_t host_mem_descs_dma;
-	struct nvme_host_mem_buf_desc *host_mem_descs;
-	void **host_mem_desc_bufs;
-	unsigned int nr_allocated_queues;
-	unsigned int nr_write_queues;
-	unsigned int nr_poll_queues;
-	struct nvme_descriptor_pools descriptor_pools[];
-};
 
 static int io_queue_depth_set(const char *val, const struct kernel_param *kp)
 {
@@ -364,95 +301,6 @@ static inline struct nvme_dev *to_nvme_dev(struct nvme_ctrl *ctrl)
 {
 	return container_of(ctrl, struct nvme_dev, ctrl);
 }
-
-/*
- * An NVM Express queue.  Each device has at least two (one for admin
- * commands and one for I/O commands).
- */
-struct nvme_queue {
-	struct nvme_dev *dev;
-	struct nvme_descriptor_pools descriptor_pools;
-	spinlock_t sq_lock;
-	void *sq_cmds;
-	 /* only used for poll queues: */
-	spinlock_t cq_poll_lock ____cacheline_aligned_in_smp;
-	struct nvme_completion *cqes;
-	dma_addr_t sq_dma_addr;
-	dma_addr_t cq_dma_addr;
-	u32 __iomem *q_db;
-	u32 q_depth;
-	u16 cq_vector;
-	u16 sq_tail;
-	u16 last_sq_tail;
-	u16 cq_head;
-	u16 qid;
-	u8 cq_phase;
-	u8 sqes;
-	unsigned long flags;
-#define NVMEQ_ENABLED		0
-#define NVMEQ_SQ_CMB		1
-#define NVMEQ_DELETE_ERROR	2
-#define NVMEQ_POLLED		3
-	__le32 *dbbuf_sq_db;
-	__le32 *dbbuf_cq_db;
-	__le32 *dbbuf_sq_ei;
-	__le32 *dbbuf_cq_ei;
-	struct completion delete_done;
-};
-
-/* bits for iod->flags */
-enum nvme_iod_flags {
-	/* this command has been aborted by the timeout handler */
-	IOD_ABORTED		= 1U << 0,
-
-	/* uses the small descriptor pool */
-	IOD_SMALL_DESCRIPTOR	= 1U << 1,
-
-	/* single segment dma mapping */
-	IOD_SINGLE_SEGMENT	= 1U << 2,
-
-	/* Data payload contains p2p memory */
-	IOD_DATA_P2P		= 1U << 3,
-
-	/* Metadata contains p2p memory */
-	IOD_META_P2P		= 1U << 4,
-
-	/* Data payload contains MMIO memory */
-	IOD_DATA_MMIO		= 1U << 5,
-
-	/* Metadata contains MMIO memory */
-	IOD_META_MMIO		= 1U << 6,
-
-	/* Metadata using non-coalesced MPTR */
-	IOD_SINGLE_META_SEGMENT	= 1U << 7,
-};
-
-struct nvme_dma_vec {
-	dma_addr_t addr;
-	unsigned int len;
-};
-
-/*
- * The nvme_iod describes the data in an I/O.
- */
-struct nvme_iod {
-	struct nvme_request req;
-	struct nvme_command cmd;
-	u8 flags;
-	u8 nr_descriptors;
-
-	size_t total_len;
-	struct dma_iova_state dma_state;
-	void *descriptors[NVME_MAX_NR_DESCRIPTORS];
-	struct nvme_dma_vec *dma_vecs;
-	unsigned int nr_dma_vecs;
-
-	dma_addr_t meta_dma;
-	size_t meta_total_len;
-	struct dma_iova_state meta_dma_state;
-	struct nvme_sgl_desc *meta_descriptor;
-	void *apple_h9p_req;
-};
 
 static inline unsigned int nvme_dbbuf_size(struct nvme_dev *dev)
 {
@@ -894,8 +742,6 @@ static void nvme_free_sgls(struct request *req, struct nvme_sgl_desc *sge,
 			le32_to_cpu(sg_list[i].length), dir, attrs);
 }
 
-#include "pci-apple-h9p.c"
-
 static void nvme_unmap_metadata(struct request *req)
 {
 	struct nvme_queue *nvmeq = req->mq_hctx->driver_data;
@@ -942,7 +788,8 @@ static void nvme_unmap_data(struct request *req)
 	struct device *dma_dev = nvmeq->dev->dev;
 	unsigned int attrs = 0;
 
-	if (nvmeq->dev->apple_h9p && nvme_pci_apple_h9p_unmap_data(req))
+	if (nvmeq->dev->dma_ops && nvmeq->dev->dma_ops->unmap_data &&
+	    nvmeq->dev->dma_ops->unmap_data(req))
 		return;
 
 	if (iod->flags & IOD_SINGLE_SEGMENT) {
@@ -1259,8 +1106,8 @@ static blk_status_t nvme_map_data(struct request *req)
 	struct blk_dma_iter iter;
 	blk_status_t ret;
 
-	if (dev->apple_h9p) {
-		ret = nvme_pci_apple_h9p_map_data(req);
+	if (dev->dma_ops && dev->dma_ops->map_data) {
+		ret = dev->dma_ops->map_data(req);
 		if (ret != BLK_STS_NOTSUPP)
 			return ret;
 	}
@@ -1421,7 +1268,7 @@ static blk_status_t nvme_prep_rq(struct request *req)
 	iod->meta_total_len = 0;
 	iod->nr_dma_vecs = 0;
 	iod->dma_vecs = NULL;
-	iod->apple_h9p_req = NULL;
+	iod->dma_private = NULL;
 
 	ret = nvme_setup_cmd(req->q->queuedata, req);
 	if (ret)
@@ -2031,17 +1878,17 @@ disable:
 
 static void nvme_free_queue(struct nvme_queue *nvmeq)
 {
-	dma_free_coherent(nvmeq->dev->dev, CQ_SIZE(nvmeq),
-				(void *)nvmeq->cqes, nvmeq->cq_dma_addr);
+	dma_free_coherent(nvmeq->dev->dev, nvme_pci_cq_size(nvmeq),
+			  (void *)nvmeq->cqes, nvmeq->cq_dma_addr);
 	if (!nvmeq->sq_cmds)
 		return;
 
 	if (test_and_clear_bit(NVMEQ_SQ_CMB, &nvmeq->flags)) {
 		pci_free_p2pmem(to_pci_dev(nvmeq->dev->dev),
-				nvmeq->sq_cmds, SQ_SIZE(nvmeq));
+				nvmeq->sq_cmds, nvme_pci_sq_size(nvmeq));
 	} else {
-		dma_free_coherent(nvmeq->dev->dev, SQ_SIZE(nvmeq),
-				nvmeq->sq_cmds, nvmeq->sq_dma_addr);
+		dma_free_coherent(nvmeq->dev->dev, nvme_pci_sq_size(nvmeq),
+				  nvmeq->sq_cmds, nvmeq->sq_dma_addr);
 	}
 }
 
@@ -2128,7 +1975,8 @@ static int nvme_alloc_sq_cmds(struct nvme_dev *dev, struct nvme_queue *nvmeq,
 	struct pci_dev *pdev = to_pci_dev(dev->dev);
 
 	if (qid && dev->cmb_use_sqes && (dev->cmbsz & NVME_CMBSZ_SQS)) {
-		nvmeq->sq_cmds = pci_alloc_p2pmem(pdev, SQ_SIZE(nvmeq));
+		nvmeq->sq_cmds = pci_alloc_p2pmem(pdev,
+						  nvme_pci_sq_size(nvmeq));
 		if (nvmeq->sq_cmds) {
 			nvmeq->sq_dma_addr = pci_p2pmem_virt_to_bus(pdev,
 							nvmeq->sq_cmds);
@@ -2137,12 +1985,13 @@ static int nvme_alloc_sq_cmds(struct nvme_dev *dev, struct nvme_queue *nvmeq,
 				return 0;
 			}
 
-			pci_free_p2pmem(pdev, nvmeq->sq_cmds, SQ_SIZE(nvmeq));
+			pci_free_p2pmem(pdev, nvmeq->sq_cmds,
+					nvme_pci_sq_size(nvmeq));
 		}
 	}
 
-	nvmeq->sq_cmds = dma_alloc_coherent(dev->dev, SQ_SIZE(nvmeq),
-				&nvmeq->sq_dma_addr, GFP_KERNEL);
+	nvmeq->sq_cmds = dma_alloc_coherent(dev->dev, nvme_pci_sq_size(nvmeq),
+					    &nvmeq->sq_dma_addr, GFP_KERNEL);
 	if (!nvmeq->sq_cmds)
 		return -ENOMEM;
 	return 0;
@@ -2157,7 +2006,7 @@ static int nvme_alloc_queue(struct nvme_dev *dev, int qid, int depth)
 
 	nvmeq->sqes = qid ? dev->io_sqes : NVME_ADM_SQES;
 	nvmeq->q_depth = depth;
-	nvmeq->cqes = dma_alloc_coherent(dev->dev, CQ_SIZE(nvmeq),
+	nvmeq->cqes = dma_alloc_coherent(dev->dev, nvme_pci_cq_size(nvmeq),
 					 &nvmeq->cq_dma_addr, GFP_KERNEL);
 	if (!nvmeq->cqes)
 		goto free_nvmeq;
@@ -2177,8 +2026,8 @@ static int nvme_alloc_queue(struct nvme_dev *dev, int qid, int depth)
 	return 0;
 
  free_cqdma:
-	dma_free_coherent(dev->dev, CQ_SIZE(nvmeq), (void *)nvmeq->cqes,
-			  nvmeq->cq_dma_addr);
+	dma_free_coherent(dev->dev, nvme_pci_cq_size(nvmeq),
+			  (void *)nvmeq->cqes, nvmeq->cq_dma_addr);
  free_nvmeq:
 	return -ENOMEM;
 }
@@ -2206,7 +2055,7 @@ static void nvme_init_queue(struct nvme_queue *nvmeq, u16 qid)
 	nvmeq->cq_head = 0;
 	nvmeq->cq_phase = 1;
 	nvmeq->q_db = &dev->dbs[qid * 2 * dev->db_stride];
-	memset((void *)nvmeq->cqes, 0, CQ_SIZE(nvmeq));
+	memset((void *)nvmeq->cqes, 0, nvme_pci_cq_size(nvmeq));
 	nvme_dbbuf_init(dev, nvmeq, qid);
 	dev->online_queues++;
 	wmb(); /* ensure the first interrupt sees the initialization */
@@ -2408,9 +2257,11 @@ static int nvme_pci_configure_admin_queue(struct nvme_dev *dev)
 	lo_hi_writeq(nvmeq->sq_dma_addr, dev->bar + NVME_REG_ASQ);
 	lo_hi_writeq(nvmeq->cq_dma_addr, dev->bar + NVME_REG_ACQ);
 
-	result = nvme_pci_apple_h9p_prepare_enable(dev);
-	if (result)
-		return result;
+	if (dev->dma_ops && dev->dma_ops->prepare_enable) {
+		result = dev->dma_ops->prepare_enable(dev);
+		if (result)
+			return result;
+	}
 
 	result = nvme_enable_ctrl(&dev->ctrl);
 	if (result)
@@ -3013,10 +2864,8 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 	result = nvme_setup_io_queues_trylock(dev);
 	if (result)
 		return result;
-	reuse_single_vector = dev->apple_h9p &&
-		(dev->ctrl.quirks & NVME_QUIRK_SINGLE_VECTOR) &&
-		pdev->msi_enabled &&
-		test_bit(NVMEQ_ENABLED, &adminq->flags);
+	reuse_single_vector = dev->dma_ops && dev->dma_ops->reuse_admin_irq &&
+		dev->dma_ops->reuse_admin_irq(dev, pdev, adminq);
 
 	if (!reuse_single_vector &&
 	    test_and_clear_bit(NVMEQ_ENABLED, &adminq->flags))
@@ -3294,14 +3143,15 @@ static int nvme_pci_enable(struct nvme_dev *dev)
 		dev_warn(dev->ctrl.device, "IO queue depth clamped to %d\n",
 			 dev->q_depth);
 	}
-	if (dev->apple_h9p &&
-	    dev->q_depth > APPLE_H9P_NVMMU_MAX_REQS)
-		dev->q_depth = APPLE_H9P_NVMMU_MAX_REQS;
+	if (dev->dma_ops && dev->dma_ops->queue_depth)
+		dev->q_depth = dev->dma_ops->queue_depth(dev, dev->q_depth);
 	dev->ctrl.sqsize = dev->q_depth - 1; /* 0's based queue depth */
 
-	result = nvme_pci_apple_h9p_preinit(dev);
-	if (result)
-		goto free_irq;
+	if (dev->dma_ops && dev->dma_ops->preinit) {
+		result = dev->dma_ops->preinit(dev);
+		if (result)
+			goto free_irq;
+	}
 
 	nvme_map_cmb(dev);
 
@@ -3425,7 +3275,8 @@ static void nvme_pci_free_ctrl(struct nvme_ctrl *ctrl)
 	nvme_free_tagset(dev);
 	put_device(dev->dev);
 	kfree(dev->queues);
-	kfree(dev->apple_h9p);
+	if (dev->dma_ops && dev->dma_ops->exit)
+		dev->dma_ops->exit(dev);
 	kfree(dev);
 }
 
@@ -3760,13 +3611,14 @@ static struct nvme_dev *nvme_pci_alloc_dev(struct pci_dev *pdev,
 		quirks |= qentry->enabled_quirks;
 		quirks &= ~qentry->disabled_quirks;
 	}
-	if (nvme_pci_is_apple_h9p(pdev)) {
-		quirks |= NVME_QUIRK_SINGLE_VECTOR | NVME_QUIRK_SHARED_TAGS;
-		dev->apple_h9p = kzalloc_node(sizeof(*dev->apple_h9p),
-					      GFP_KERNEL, node);
-		if (!dev->apple_h9p)
+	if (pdev->vendor == PCI_VENDOR_ID_APPLE &&
+	    pdev->device == PCI_DEVICE_ID_APPLE_H9P_NVME)
+		dev->dma_ops = &nvme_pci_apple_h9p_ops;
+	if (dev->dma_ops) {
+		quirks |= dev->dma_ops->quirks;
+		ret = dev->dma_ops->init(dev, node);
+		if (ret)
 			goto out_put_device;
-		spin_lock_init(&dev->apple_h9p->req_lock);
 	}
 	ret = nvme_init_ctrl(&dev->ctrl, &pdev->dev, &nvme_pci_ctrl_ops,
 			     quirks);
@@ -3787,10 +3639,10 @@ static struct nvme_dev *nvme_pci_alloc_dev(struct pci_dev *pdev,
 	dev->ctrl.max_hw_sectors = min_t(u32,
 			NVME_MAX_BYTES >> SECTOR_SHIFT,
 			dma_opt_mapping_size(&pdev->dev) >> 9);
-	if (dev->apple_h9p)
+	if (dev->dma_ops && dev->dma_ops->max_hw_sectors)
 		dev->ctrl.max_hw_sectors =
-			min_t(u32, dev->ctrl.max_hw_sectors,
-			      APPLE_H9P_NVME_MAX_SECTORS);
+			dev->dma_ops->max_hw_sectors(dev,
+						     dev->ctrl.max_hw_sectors);
 	dev->ctrl.max_segments = NVME_MAX_SEGS;
 	dev->ctrl.max_integrity_segments = 1;
 	return dev;
@@ -3798,7 +3650,8 @@ static struct nvme_dev *nvme_pci_alloc_dev(struct pci_dev *pdev,
 out_put_device:
 	put_device(dev->dev);
 	kfree(dev->queues);
-	kfree(dev->apple_h9p);
+	if (dev->dma_ops && dev->dma_ops->exit)
+		dev->dma_ops->exit(dev);
 out_free_dev:
 	kfree(dev);
 	return ERR_PTR(ret);
