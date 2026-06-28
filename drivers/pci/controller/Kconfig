@@ -54,6 +54,19 @@ config PCIE_APPLE
 
 	  If unsure, say Y if you have an Apple Silicon system.
 
+config PCIE_APPLE_H9P
+	tristate "Apple H9P/T8010 PCIe controller"
+	depends on ARCH_APPLE || COMPILE_TEST
+	depends on OF
+	depends on PCI_MSI
+	select PCI_HOST_COMMON
+	help
+	  Say Y here to enable the PCIe root complex found in Apple A10
+	  (T8010/H9P) devices. This controller is used for the internal
+	  Apple NVMe storage path on devices such as iPad7,12.
+	  It provides the legacy PHY/link setup and NVMMU/SART mapping
+	  hooks needed before the standard PCI and NVMe layers can bind.
+
 config PCI_VERSATILE
 	bool "ARM Versatile PB PCI controller"
 	depends on ARCH_VERSATILE || COMPILE_TEST
