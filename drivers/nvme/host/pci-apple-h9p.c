@@ -440,7 +440,8 @@ static u32 nvme_pci_apple_h9p_max_hw_sectors(struct nvme_dev *dev,
 }
 
 const struct nvme_pci_dma_ops nvme_pci_apple_h9p_ops = {
-	.quirks		= NVME_QUIRK_SINGLE_VECTOR | NVME_QUIRK_SHARED_TAGS,
+	.quirks		= NVME_QUIRK_SINGLE_VECTOR | NVME_QUIRK_SHARED_TAGS |
+			  NVME_QUIRK_NO_RUNTIME_RESET,
 	.init		= nvme_pci_apple_h9p_init,
 	.exit		= nvme_pci_apple_h9p_exit,
 	.preinit	= nvme_pci_apple_h9p_preinit,
